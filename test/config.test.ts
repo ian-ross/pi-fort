@@ -117,6 +117,11 @@ describe("mergeConfigs", () => {
 		expect(result.allow_egress).toBe(true);
 	});
 
+	it("keeps relative image paths unchanged when merging config objects without layer paths", () => {
+		const result = mergeConfigs([v.parse(FortFileConfig, { image: "./images/debian" })]);
+		expect(result.image).toBe("./images/debian");
+	});
+
 	it("later distro wins", () => {
 		const result = mergeConfigs([
 			v.parse(FortFileConfig, { distro: "alpine" }),

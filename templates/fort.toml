@@ -14,7 +14,7 @@ enabled = true
 # Alpine is the default. Use distro = "debian" with a custom Debian image.
 # Package names are distro-native; edit drop-ins when switching distros.
 # distro = "alpine"
-# image = "pi-fort-large:latest"
+# image = "../images/pi-fort-large"
 
 # Base packages (drop-in files in .pi/fort.d/ add more):
 packages = ["git", "curl", "jq"]

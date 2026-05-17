@@ -209,6 +209,18 @@ function collectConfigFiles(cwd) {
   }
   return layers;
 }
+function isPathLikeImage(image) {
+  return image === "~" || image.startsWith("~/") || image.startsWith("./") || image.startsWith("../") || image.startsWith("/");
+}
+function resolveImagePath(image, configPath) {
+  if (!isPathLikeImage(image)) return image;
+  const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
+  if (image === "~") return home;
+  if (image.startsWith("~/")) return join(home, image.slice(2));
+  if (image.startsWith("/")) return image;
+  if (!configPath) return image;
+  return resolve(dirname(configPath), image);
+}
 function mergeConfigs(layers) {
   const merged = {
     enabled: void 0,
@@ -225,7 +237,9 @@ function mergeConfigs(layers) {
   const mountsByTarget = /* @__PURE__ */ new Map();
   const gitCredsByHost = /* @__PURE__ */ new Map();
   const setupScripts = [];
-  for (const layer of layers) {
+  for (const inputLayer of layers) {
+    const layer = "config" in inputLayer ? inputLayer.config : inputLayer;
+    const layerPath = "config" in inputLayer ? inputLayer.path : void 0;
     if (layer.enabled !== void 0) {
       merged.enabled = layer.enabled;
     }
@@ -233,7 +247,7 @@ function mergeConfigs(layers) {
       merged.allow_egress = layer.allow_egress;
     }
     if (layer.image !== void 0) {
-      merged.image = layer.image;
+      merged.image = resolveImagePath(layer.image, layerPath);
     }
     if (layer.distro !== void 0) {
       merged.distro = layer.distro;
@@ -314,7 +328,7 @@ function resolveHostPolicies(config) {
 function loadConfig(cwd) {
   const projectDir = resolve(cwd);
   const layers = collectConfigFiles(projectDir);
-  const merged = mergeConfigs(layers.map((l) => l.config));
+  const merged = mergeConfigs(layers);
   const policies = resolveHostPolicies(merged);
   const projectPath = projectConfigPath(projectDir);
   const hasProjectConfig = layers.some((l) => l.path === projectPath);

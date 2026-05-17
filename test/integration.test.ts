@@ -124,6 +124,25 @@ describe("collectConfigFiles with drop-ins", () => {
 		expect(merged.image).toBe("dropin:latest");
 	});
 
+	it("resolves relative image paths against the config file that sets them", () => {
+		const projectDir = join(tmpDir, "project");
+		mkdirSync(join(projectDir, ".pi", "fort.d"), { recursive: true });
+		writeFileSync(join(projectDir, ".pi", "fort.toml"), 'enabled = true\nimage = "./images/main"\n');
+		writeFileSync(join(projectDir, ".pi", "fort.d", "image.toml"), 'image = "../images/dropin"\n');
+
+		const { merged } = loadConfig(projectDir);
+		expect(merged.image).toBe(join(projectDir, ".pi", "images/dropin"));
+	});
+
+	it("leaves image tags unchanged", () => {
+		const projectDir = join(tmpDir, "project");
+		mkdirSync(join(projectDir, ".pi"), { recursive: true });
+		writeFileSync(join(projectDir, ".pi", "fort.toml"), 'enabled = true\nimage = "pi-fort-debian:latest"\n');
+
+		const { merged } = loadConfig(projectDir);
+		expect(merged.image).toBe("pi-fort-debian:latest");
+	});
+
 	it("does not walk ancestor directories", () => {
 		const parent = join(tmpDir, "parent");
 		const child = join(parent, "child");

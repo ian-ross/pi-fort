@@ -83,10 +83,10 @@ Alpine is the default guest distro. Use a [custom Gondolin image](https://earend
 
 ```toml
 distro = "debian"
-image = "pi-fort-debian:latest"
+image = "../images/pi-fort-debian"
 ```
 
-Supported distros are `alpine` and `debian`. `packages` are distro-native package names and still accumulate across config layers, so edit/remove Alpine-oriented drop-ins when using Debian images. For example, the GitHub CLI package is `github-cli` on Alpine but often `gh` on Debian if your apt sources provide it. Debian images are expected to provide their own apt source configuration; pi-fort runs `apt-get update` and installs with `--no-install-recommends`.
+Relative image paths are resolved relative to the config file that sets them; image tags/references like `pi-fort-debian:latest` are left unchanged. Supported distros are `alpine` and `debian`. `packages` are distro-native package names and still accumulate across config layers, so edit/remove Alpine-oriented drop-ins when using Debian images. For example, the GitHub CLI package is `github-cli` on Alpine but often `gh` on Debian if your apt sources provide it. Debian images are expected to provide their own apt source configuration; pi-fort runs `apt-get update` and installs with `--no-install-recommends`.
 
 ### Env vars
 

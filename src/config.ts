@@ -188,8 +188,13 @@ function readTomlFile(path: string): FortFileConfig | undefined {
  * 1. `.pi/fort.toml`
  * 2. `.pi/fort.d/*.toml` in alphabetical order
  */
-export function collectConfigFiles(cwd: string): { path: string; config: FortFileConfig }[] {
-	const layers: { path: string; config: FortFileConfig }[] = [];
+export interface ConfigLayer {
+	path: string;
+	config: FortFileConfig;
+}
+
+export function collectConfigFiles(cwd: string): ConfigLayer[] {
+	const layers: ConfigLayer[] = [];
 	const projectDir = resolve(cwd);
 
 	const mainPath = projectConfigPath(projectDir);
@@ -215,12 +220,33 @@ export function collectConfigFiles(cwd: string): { path: string; config: FortFil
 	return layers;
 }
 
+function isPathLikeImage(image: string): boolean {
+	return (
+		image === "~" ||
+		image.startsWith("~/") ||
+		image.startsWith("./") ||
+		image.startsWith("../") ||
+		image.startsWith("/")
+	);
+}
+
+function resolveImagePath(image: string, configPath: string | undefined): string {
+	if (!isPathLikeImage(image)) return image;
+
+	const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
+	if (image === "~") return home;
+	if (image.startsWith("~/")) return join(home, image.slice(2));
+	if (image.startsWith("/")) return image;
+	if (!configPath) return image;
+	return resolve(dirname(configPath), image);
+}
+
 /**
  * Merge config layers. Later layers override earlier ones.
  * Secrets and hosts are merged by key (later wins).
  * Packages accumulate across layers and are deduplicated.
  */
-export function mergeConfigs(layers: FortFileConfig[]): FortFileConfig {
+export function mergeConfigs(layers: FortFileConfig[] | ConfigLayer[]): FortFileConfig {
 	const merged: FortFileConfig = {
 		enabled: undefined,
 		allow_egress: false,
@@ -240,7 +266,10 @@ export function mergeConfigs(layers: FortFileConfig[]): FortFileConfig {
 	// Collect setup scripts in order (each file's script runs sequentially)
 	const setupScripts: string[] = [];
 
-	for (const layer of layers) {
+	for (const inputLayer of layers) {
+		const layer = "config" in inputLayer ? inputLayer.config : inputLayer;
+		const layerPath = "config" in inputLayer ? inputLayer.path : undefined;
+
 		if (layer.enabled !== undefined) {
 			merged.enabled = layer.enabled;
 		}
@@ -248,7 +277,7 @@ export function mergeConfigs(layers: FortFileConfig[]): FortFileConfig {
 			merged.allow_egress = layer.allow_egress;
 		}
 		if (layer.image !== undefined) {
-			merged.image = layer.image;
+			merged.image = resolveImagePath(layer.image, layerPath);
 		}
 		if (layer.distro !== undefined) {
 			merged.distro = layer.distro;
@@ -353,7 +382,7 @@ export function loadConfig(cwd: string): {
 } {
 	const projectDir = resolve(cwd);
 	const layers = collectConfigFiles(projectDir);
-	const merged = mergeConfigs(layers.map((l) => l.config));
+	const merged = mergeConfigs(layers);
 	const policies = resolveHostPolicies(merged);
 
 	const projectPath = projectConfigPath(projectDir);
