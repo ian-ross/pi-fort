@@ -5,5 +5,5 @@ export default defineConfig({
 	format: "esm",
 	dts: true,
 	clean: true,
-	external: ["@mariozechner/pi-coding-agent", "@earendil-works/gondolin"],
+	external: ["@earendil-works/pi-coding-agent", "@earendil-works/gondolin"],
 });

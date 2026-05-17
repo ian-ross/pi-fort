@@ -5,7 +5,7 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	addPackageToConfig,
 	collectConfigFiles,
@@ -14,7 +14,6 @@ import {
 	globalDropInDir,
 	initProjectConfig,
 	loadConfig,
-	mergeConfigs,
 } from "../src/config.js";
 
 // Override HOME so we don't touch real config

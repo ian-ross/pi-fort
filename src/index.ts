@@ -9,9 +9,9 @@
  */
 
 import { join } from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { createBashTool, createEditTool, createReadTool, createWriteTool } from "@mariozechner/pi-coding-agent";
-
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { createBashTool, createEditTool, createReadTool, createWriteTool } from "@earendil-works/pi-coding-agent";
+import type { ResolvedSecret } from "./config.js";
 import {
 	addPackageToConfig,
 	ensureGlobalConfig,
@@ -19,14 +19,12 @@ import {
 	globalDropInDir,
 	initProjectConfig,
 	loadConfig,
-	projectConfigPath,
 	tildify,
 } from "./config.js";
-import type { ResolvedSecret } from "./config.js";
 import { getPackageManager } from "./package-manager.js";
 import { resolveEnv, resolveSecrets } from "./secrets.js";
 import { createVmBashOps, createVmEditOps, createVmReadOps, createVmWriteOps } from "./tools.js";
-import { FortVM, checkQemuAvailable } from "./vm.js";
+import { checkQemuAvailable, FortVM } from "./vm.js";
 
 // ---------------------------------------------------------------------------
 // /fort add: search, confirm, install, persist
@@ -263,18 +261,9 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
-	pi.on("session_switch", async (_event, ctx) => {
+	pi.on("session_shutdown", async (_event, ctx) => {
 		await shutdownVm();
 		ctx.ui.setStatus("fort", undefined);
-		// Restore from new session's log
-		sessionOverride = getSessionActivation(ctx);
-
-		if (isActive()) {
-			ensureVm(ctx);
-			if (!isLastHintActive(ctx)) {
-				sendFortHint();
-			}
-		}
 	});
 
 	// -----------------------------------------------------------------------

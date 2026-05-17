@@ -11,13 +11,13 @@ import { execSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import {
 	type CreateHttpHooksOptions,
+	createHttpHooks,
+	createShadowPathPredicate,
 	type ExecResult,
 	RealFSProvider,
 	type SecretDefinition,
 	ShadowProvider,
 	VM,
-	createHttpHooks,
-	createShadowPathPredicate,
 } from "@earendil-works/gondolin";
 
 import type { GitCredentialDef, ResolvedHostPolicy, ResolvedSecret } from "./config.js";

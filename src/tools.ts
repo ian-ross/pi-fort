@@ -9,7 +9,7 @@
 
 import path from "node:path";
 import type { VM } from "@earendil-works/gondolin";
-import type { BashOperations, EditOperations, ReadOperations, WriteOperations } from "@mariozechner/pi-coding-agent";
+import type { BashOperations, EditOperations, ReadOperations, WriteOperations } from "@earendil-works/pi-coding-agent";
 
 export function shQuote(value: string): string {
 	return `'${value.replace(/'/g, "'\\''")}'`;

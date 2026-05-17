@@ -48,13 +48,11 @@ describe("resolveSecrets", () => {
 			expect(secrets[0].value).toBe("secret_value");
 			expect(secrets[0].hosts).toEqual(["api.example.com"]);
 		} finally {
-			// biome-ignore lint/performance/noDelete: process.env needs delete to truly unset
 			delete process.env.TEST_SECRET;
 		}
 	});
 
 	it("skips env secrets when env var is not set", () => {
-		// biome-ignore lint/performance/noDelete: process.env needs delete to truly unset
 		delete process.env.MISSING_VAR;
 		const secrets = resolveSecrets({
 			MISSING: { env: "MISSING_VAR", hosts: ["example.com"] },
@@ -78,7 +76,6 @@ describe("resolveSecrets", () => {
 			});
 			expect(secrets).toHaveLength(2);
 		} finally {
-			// biome-ignore lint/performance/noDelete: process.env needs delete to truly unset
 			delete process.env.OPENAI_KEY;
 		}
 	});
@@ -106,7 +103,6 @@ describe("resolveEnv", () => {
 			const env = resolveEnv({ GREETING: { env: "TEST_VAR" } });
 			expect(env.GREETING).toBe("hello");
 		} finally {
-			// biome-ignore lint/performance/noDelete: process.env needs delete to truly unset
 			delete process.env.TEST_VAR;
 		}
 	});
