@@ -1,4 +1,4 @@
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createVfsMounts } from "../src/vm.js";
@@ -23,6 +23,22 @@ describe("createVfsMounts", () => {
 
 		expect(Object.keys(mounts)).toEqual([workspace]);
 		expect(mounts[workspace]?.readonly).toBe(false);
+	});
+
+	it("mounts the workspace .pi directory as readable but read-only", async () => {
+		const workspace = join(tmpDir, "workspace");
+		const piDir = join(workspace, ".pi");
+		mkdirSync(piDir, { recursive: true });
+		writeFileSync(join(piDir, "fort.toml"), "enabled = true\n");
+
+		const mounts = createVfsMounts(workspace, []);
+		const piProvider = mounts[piDir]!;
+
+		expect(piProvider).toBeDefined();
+		expect(piProvider.readonly).toBe(true);
+		await expect(piProvider.readFile("/fort.toml", "utf-8")).resolves.toBe("enabled = true\n");
+		await expect(piProvider.writeFile("/fort.toml", "enabled = false")).rejects.toThrow();
+		await expect(piProvider.mkdir("/new-dir", { recursive: true })).rejects.toThrow();
 	});
 
 	it("uses target as the guest mount path for extra mounts", () => {

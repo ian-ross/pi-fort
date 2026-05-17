@@ -12,12 +12,10 @@ import { existsSync } from "node:fs";
 import {
 	type CreateHttpHooksOptions,
 	createHttpHooks,
-	createShadowPathPredicate,
 	type ExecResult,
 	ReadonlyProvider,
 	RealFSProvider,
 	type SecretDefinition,
-	ShadowProvider,
 	VM,
 } from "@earendil-works/gondolin";
 
@@ -34,7 +32,7 @@ export interface ExtraMount {
 	readonly: boolean;
 }
 
-export type FortVfsMounts = Record<string, RealFSProvider | ReadonlyProvider | ShadowProvider>;
+export type FortVfsMounts = Record<string, RealFSProvider | ReadonlyProvider>;
 
 /**
  * Build the Gondolin VFS mount map for the workspace and configured extra mounts.
@@ -44,15 +42,17 @@ export type FortVfsMounts = Record<string, RealFSProvider | ReadonlyProvider | S
 export function createVfsMounts(workspaceDir: string, extraMounts: ExtraMount[]): FortVfsMounts {
 	// Build VFS: mount workspace at the same path as on the host.
 	// This makes the VM transparent: paths match between host and guest.
-	const realFs = new RealFSProvider(workspaceDir);
-	const shadowedFs = new ShadowProvider(realFs, {
-		shouldShadow: createShadowPathPredicate(["/.pi/fort.toml"]),
-		writeMode: "deny",
-	});
-
 	const mounts: FortVfsMounts = {
-		[workspaceDir]: shadowedFs,
+		[workspaceDir]: new RealFSProvider(workspaceDir),
 	};
+
+	// Keep project-local pi-fort config visible but read-only inside the VM.
+	// Gondolin routes to the longest matching mount prefix, so this read-only
+	// mount overlays the writable workspace mount for <workspace>/.pi.
+	const piDir = `${workspaceDir}/.pi`;
+	if (existsSync(piDir)) {
+		mounts[piDir] = new ReadonlyProvider(new RealFSProvider(piDir));
+	}
 
 	// Extra mounts (e.g. jj repo root, shared directories).
 	// Skip paths that don't exist on the host (common with optional mounts like .jj/.git).
