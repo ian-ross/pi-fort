@@ -1,8 +1,8 @@
-# pi-fort global configuration
+# pi-fort project configuration
 # See: https://github.com/ian-ross/pi-fort
 
-# Default for projects without their own .pi/fort.toml:
-# enabled = false
+# Enable pi-fort for this project.
+enabled = true
 
 # Optional guest distro and custom Gondolin image tag or asset path.
 # Alpine is the default. Use distro = "debian" with a custom Debian image.
@@ -10,8 +10,12 @@
 # distro = "alpine"
 # image = "pi-fort-large:latest"
 
-# Base packages (drop-in files in pi-fort.d/ add more):
+# Base packages (drop-in files in .pi/fort.d/ add more):
 packages = ["git", "curl", "jq"]
+
+# Mount directories outside the workspace (relative paths ok, supports ~).
+# Missing paths are silently skipped.
+# mounts = ["../.git"]
 
 # Environment variables available in the VM and setup scripts.
 # Values can be static strings, host commands, or host env vars.
@@ -19,8 +23,8 @@ packages = ["git", "curl", "jq"]
 USER_NAME = { command = "git config --global user.name" }
 USER_EMAIL = { command = "git config --global user.email" }
 
-# Service policies live in pi-fort.d/ as drop-in files.
-# See pi-fort.d/ for examples.
+# Service policies live in .pi/fort.d/ as drop-in files.
+# See .pi/fort.d/ for examples.
 
 # Additional secrets:
 # [secrets.OPENAI_API_KEY]

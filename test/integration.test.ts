@@ -3,17 +3,15 @@
  * Uses a temp directory to avoid touching real config files.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	addPackageToConfig,
 	collectConfigFiles,
-	ensureGlobalConfig,
-	globalConfigPath,
-	globalDropInDir,
 	initProjectConfig,
 	loadConfig,
+	projectDropInDir,
 } from "../src/config.js";
 
 // Override HOME so we don't touch real config
@@ -30,108 +28,102 @@ beforeEach(() => {
 afterEach(() => {
 	process.env.HOME = origHome;
 	// Clean up
-	const { rmSync } = require("node:fs");
 	rmSync(tmpDir, { recursive: true, force: true });
 });
 
-describe("ensureGlobalConfig", () => {
-	it("creates main config and drop-in files", () => {
-		const created = ensureGlobalConfig();
+describe("initProjectConfig", () => {
+	it("creates project config and drop-in files from templates", () => {
+		const projectDir = join(tmpDir, "project");
+		mkdirSync(projectDir, { recursive: true });
+		const created = initProjectConfig(projectDir);
 		expect(created.length).toBeGreaterThan(0);
-		expect(existsSync(globalConfigPath())).toBe(true);
-		expect(existsSync(join(globalDropInDir(), "git.toml"))).toBe(true);
-		expect(existsSync(join(globalDropInDir(), "jj.toml"))).toBe(true);
-		expect(existsSync(join(globalDropInDir(), "github.toml"))).toBe(true);
+		expect(existsSync(join(projectDir, ".pi", "fort.toml"))).toBe(true);
+		expect(existsSync(join(projectDir, ".pi", "fort.d", "git.toml"))).toBe(true);
+		expect(existsSync(join(projectDir, ".pi", "fort.d", "github.toml"))).toBe(true);
+		expect(existsSync(join(projectDir, ".pi", "fort.d", "jj.toml"))).toBe(false);
+
+		const content = readFileSync(join(projectDir, ".pi", "fort.toml"), "utf-8");
+		expect(content).toContain("enabled = true");
+		expect(content).toContain('packages = ["git", "curl", "jq"]');
 	});
 
 	it("does not overwrite existing files", () => {
-		ensureGlobalConfig();
-		// Modify the config
-		const configPath = globalConfigPath();
-		writeFileSync(configPath, 'packages = ["custom"]\n');
-		// Run again
-		const created = ensureGlobalConfig();
-		expect(created).toEqual([]);
-		expect(readFileSync(configPath, "utf-8")).toContain("custom");
-	});
-});
-
-describe("initProjectConfig", () => {
-	it("creates project config from template", () => {
 		const projectDir = join(tmpDir, "project");
-		mkdirSync(projectDir, { recursive: true });
-		const result = initProjectConfig(projectDir);
-		expect(result).toBe(true);
-		const content = readFileSync(join(projectDir, ".pi", "fort.toml"), "utf-8");
-		expect(content).toContain("enabled = true");
-	});
+		mkdirSync(join(projectDir, ".pi", "fort.d"), { recursive: true });
+		writeFileSync(join(projectDir, ".pi", "fort.toml"), 'packages = ["custom"]\n');
+		writeFileSync(join(projectDir, ".pi", "fort.d", "git.toml"), 'packages = ["custom-git"]\n');
 
-	it("does not overwrite existing project config", () => {
-		const projectDir = join(tmpDir, "project");
-		mkdirSync(join(projectDir, ".pi"), { recursive: true });
-		writeFileSync(join(projectDir, ".pi", "fort.toml"), "enabled = false\n");
-		const result = initProjectConfig(projectDir);
-		expect(result).toBe(false);
+		initProjectConfig(projectDir);
+
+		expect(readFileSync(join(projectDir, ".pi", "fort.toml"), "utf-8")).toContain("custom");
+		expect(readFileSync(join(projectDir, ".pi", "fort.d", "git.toml"), "utf-8")).toContain("custom-git");
+		expect(existsSync(join(projectDir, ".pi", "fort.d", "github.toml"))).toBe(true);
 	});
 });
 
 describe("collectConfigFiles with drop-ins", () => {
-	it("loads global config and drop-in files", () => {
-		ensureGlobalConfig();
-		const layers = collectConfigFiles(tmpDir);
-		// Global + git.toml + github.toml + jj.toml (alphabetical)
-		expect(layers.length).toBeGreaterThanOrEqual(4);
+	it("loads project config and project drop-in files", () => {
+		const projectDir = join(tmpDir, "project");
+		initProjectConfig(projectDir);
+		const layers = collectConfigFiles(projectDir);
 		const paths = layers.map((l) => l.path);
-		expect(paths[0]).toBe(globalConfigPath());
-		// Drop-ins are alphabetical
-		expect(paths[1]).toContain("git.toml");
-		expect(paths[2]).toContain("github.toml");
-		expect(paths[3]).toContain("jj.toml");
+		expect(paths).toEqual([
+			join(projectDir, ".pi", "fort.toml"),
+			join(projectDir, ".pi", "fort.d", "git.toml"),
+			join(projectDir, ".pi", "fort.d", "github.toml"),
+		]);
 	});
 
-	it("merges packages from all layers additively", () => {
-		ensureGlobalConfig();
+	it("ignores old global config files", () => {
+		mkdirSync(join(tmpDir, ".pi", "agent", "extensions", "pi-fort.d"), { recursive: true });
+		writeFileSync(join(tmpDir, ".pi", "agent", "extensions", "pi-fort.toml"), 'packages = ["global-only"]\n');
+		writeFileSync(join(tmpDir, ".pi", "agent", "extensions", "pi-fort.d", "old.toml"), 'packages = ["old-dropin"]\n');
+
 		const { merged } = loadConfig(tmpDir);
+		expect(merged.packages).not.toContain("global-only");
+		expect(merged.packages).not.toContain("old-dropin");
+	});
+
+	it("merges packages from project layers additively", () => {
+		const projectDir = join(tmpDir, "project");
+		initProjectConfig(projectDir);
+		const { merged } = loadConfig(projectDir);
 		const pkgs = merged.packages ?? [];
 		expect(pkgs).toContain("curl");
 		expect(pkgs).toContain("jq");
 		expect(pkgs).toContain("git");
-		expect(pkgs).toContain("jujutsu");
 		expect(pkgs).toContain("github-cli");
+		expect(pkgs).not.toContain("jujutsu");
 	});
 
 	it("collects setup scripts from drop-ins", () => {
-		ensureGlobalConfig();
-		const { merged } = loadConfig(tmpDir);
+		const projectDir = join(tmpDir, "project");
+		initProjectConfig(projectDir);
+		const { merged } = loadConfig(projectDir);
 		expect(merged.setup).toContain("safe.directory");
-		expect(merged.setup).toContain("jj config set");
+		expect(merged.setup).not.toContain("jj config set");
 	});
 
 	it("reports config sources accurately", () => {
-		ensureGlobalConfig();
 		const projectDir = join(tmpDir, "project");
-		mkdirSync(join(projectDir, ".pi"), { recursive: true });
-		writeFileSync(join(projectDir, ".pi", "fort.toml"), "enabled = true\n");
+		initProjectConfig(projectDir);
 
 		const result = loadConfig(projectDir);
-		expect(result.hasGlobalConfig).toBe(true);
 		expect(result.hasProjectConfig).toBe(true);
-		expect(result.dropIns).toEqual(["git", "github", "jj"]);
+		expect(result.dropIns).toEqual(["git", "github"]);
 	});
 
-	it("uses the last configured image", () => {
-		ensureGlobalConfig();
-		writeFileSync(globalConfigPath(), 'image = "global:latest"\n');
+	it("lets drop-ins override the main project config", () => {
 		const projectDir = join(tmpDir, "project");
-		mkdirSync(join(projectDir, ".pi"), { recursive: true });
-		writeFileSync(join(projectDir, ".pi", "fort.toml"), 'enabled = true\nimage = "project:latest"\n');
+		mkdirSync(join(projectDir, ".pi", "fort.d"), { recursive: true });
+		writeFileSync(join(projectDir, ".pi", "fort.toml"), 'enabled = true\nimage = "main:latest"\n');
+		writeFileSync(join(projectDir, ".pi", "fort.d", "image.toml"), 'image = "dropin:latest"\n');
 
 		const { merged } = loadConfig(projectDir);
-		expect(merged.image).toBe("project:latest");
+		expect(merged.image).toBe("dropin:latest");
 	});
 
 	it("does not walk ancestor directories", () => {
-		ensureGlobalConfig();
 		const parent = join(tmpDir, "parent");
 		const child = join(parent, "child");
 		mkdirSync(join(parent, ".pi"), { recursive: true });
@@ -139,43 +131,41 @@ describe("collectConfigFiles with drop-ins", () => {
 		writeFileSync(join(parent, ".pi", "fort.toml"), "enabled = true\n");
 
 		const result = loadConfig(child);
-		// Parent config should NOT be picked up
 		expect(result.hasProjectConfig).toBe(false);
 		expect(result.merged.enabled).toBeUndefined();
 	});
 });
 
 describe("addPackageToConfig", () => {
-	it("adds a package to an existing config", () => {
-		ensureGlobalConfig();
-		addPackageToConfig(tmpDir, "ripgrep", "global");
-		const content = readFileSync(globalConfigPath(), "utf-8");
+	it("adds a package to an existing project config", () => {
+		const projectDir = join(tmpDir, "project");
+		initProjectConfig(projectDir);
+		addPackageToConfig(projectDir, "ripgrep");
+		const content = readFileSync(join(projectDir, ".pi", "fort.toml"), "utf-8");
 		expect(content).toContain("ripgrep");
-		expect(content).toContain("curl"); // original packages preserved
+		expect(content).toContain("curl");
 	});
 
 	it("does not duplicate existing packages", () => {
-		ensureGlobalConfig();
-		addPackageToConfig(tmpDir, "curl", "global");
-		const content = readFileSync(globalConfigPath(), "utf-8");
+		const projectDir = join(tmpDir, "project");
+		initProjectConfig(projectDir);
+		addPackageToConfig(projectDir, "curl");
+		const content = readFileSync(join(projectDir, ".pi", "fort.toml"), "utf-8");
 		const matches = content.match(/curl/g);
 		expect(matches).toHaveLength(1);
 	});
 
-	it("does not seed project config with hardcoded packages", () => {
+	it("creates project config when needed", () => {
 		const projectDir = join(tmpDir, "project");
-		addPackageToConfig(projectDir, "ripgrep", "project");
+		addPackageToConfig(projectDir, "ripgrep");
 		const content = readFileSync(join(projectDir, ".pi", "fort.toml"), "utf-8");
 		expect(content).toContain('packages = ["ripgrep"]');
-		expect(content).not.toContain("curl");
-		expect(content).not.toContain("jq");
-		expect(content).not.toContain("git");
+		expect(existsSync(projectDropInDir(projectDir))).toBe(false);
 	});
 });
 
 describe("mount path resolution", () => {
 	it("expands ~ to HOME in mount paths", () => {
-		ensureGlobalConfig();
 		const projectDir = join(tmpDir, "project");
 		mkdirSync(join(projectDir, ".pi"), { recursive: true });
 		writeFileSync(join(projectDir, ".pi", "fort.toml"), 'enabled = true\n\n[[mounts]]\npath = "~/dev/.jj"\n');
@@ -184,7 +174,6 @@ describe("mount path resolution", () => {
 	});
 
 	it("expands ~ in bare string mounts", () => {
-		ensureGlobalConfig();
 		const projectDir = join(tmpDir, "project");
 		mkdirSync(join(projectDir, ".pi"), { recursive: true });
 		writeFileSync(join(projectDir, ".pi", "fort.toml"), 'enabled = true\nmounts = ["~/dev/.jj", "~/dev/.git"]\n');

@@ -5,8 +5,8 @@
  * The VM sees placeholder values; the Gondolin HTTP proxy substitutes
  * real values only for requests to configured hosts.
  *
- * All secrets are explicitly configured in .pi/fort.toml or the
- * global config. There is no auto-detection.
+ * All secrets are explicitly configured in .pi/fort.toml or .pi/fort.d/.
+ * There is no auto-detection.
  */
 
 import { execSync } from "node:child_process";

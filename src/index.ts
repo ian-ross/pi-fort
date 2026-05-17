@@ -8,17 +8,15 @@
  * See README.md for architecture and configuration details.
  */
 
-import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createBashTool, createEditTool, createReadTool, createWriteTool } from "@earendil-works/pi-coding-agent";
 import type { ResolvedSecret } from "./config.js";
 import {
 	addPackageToConfig,
-	ensureGlobalConfig,
-	globalConfigPath,
-	globalDropInDir,
 	initProjectConfig,
 	loadConfig,
+	projectConfigPath,
+	projectDropInDir,
 	tildify,
 } from "./config.js";
 import { getPackageManager } from "./package-manager.js";
@@ -90,20 +88,8 @@ async function handleAddPackage(
 		return;
 	}
 
-	// Offer to persist
-	const saveChoice = await ctx.ui.select(`\u2705 Installed ${targetPkg}. Save to config?`, [
-		"Save to project (.pi/fort.toml)",
-		`Save to global (${tildify(globalConfigPath())})`,
-		"Don't save (this session only)",
-	]);
-
-	if (saveChoice === "Save to project (.pi/fort.toml)") {
-		addPackageToConfig(cwd, targetPkg, "project");
-		ctx.ui.notify(`🧊 Added ${targetPkg} to .pi/fort.toml`);
-	} else if (saveChoice?.startsWith("Save to global")) {
-		addPackageToConfig(cwd, targetPkg, "global");
-		ctx.ui.notify(`🧊 Added ${targetPkg} to ${tildify(globalConfigPath())}`);
-	}
+	addPackageToConfig(cwd, targetPkg);
+	ctx.ui.notify(`✅ Installed ${targetPkg} and added it to .pi/fort.toml`);
 }
 
 // ---------------------------------------------------------------------------
@@ -126,15 +112,10 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	// -----------------------------------------------------------------------
-	// Ensure global config template exists
-	// -----------------------------------------------------------------------
-	ensureGlobalConfig();
-
-	// -----------------------------------------------------------------------
 	// Load config and secrets
 	// -----------------------------------------------------------------------
 	const localCwd = process.cwd();
-	const { merged, policies, hasGlobalConfig, hasProjectConfig, dropIns } = loadConfig(localCwd);
+	const { merged, policies, hasProjectConfig, dropIns } = loadConfig(localCwd);
 	const image = merged.image;
 	const distro = merged.distro ?? "alpine";
 	const packages = merged.packages ?? [];
@@ -372,9 +353,8 @@ export default function (pi: ExtensionAPI) {
 
 					// Config sources
 					const configLines: string[] = [];
-					if (hasGlobalConfig) configLines.push(`  ${tildify(globalConfigPath())}`);
-					if (dropIns.length) configLines.push(`  ${tildify(globalDropInDir())}/*`);
-					if (hasProjectConfig) configLines.push(`  ${tildify(join(localCwd, ".pi", "fort.toml"))}`);
+					if (hasProjectConfig) configLines.push(`  ${tildify(projectConfigPath(localCwd))}`);
+					if (dropIns.length) configLines.push(`  ${tildify(projectDropInDir(localCwd))}/*`);
 					if (configLines.length) {
 						lines.push("Config:");
 						lines.push(...configLines);
@@ -401,25 +381,23 @@ export default function (pi: ExtensionAPI) {
 				}
 
 				case "init": {
-					const createdGlobal = ensureGlobalConfig();
-					const createdProject = initProjectConfig(localCwd);
+					const created = initProjectConfig(localCwd);
 
 					const messages: string[] = [];
-					for (const path of createdGlobal) {
+					for (const path of created) {
 						messages.push(`Created ${tildify(path)}`);
 					}
-					if (createdProject) {
-						messages.push("Created .pi/fort.toml with enabled = true");
+					if (created.length === 0) {
+						messages.push(".pi/fort.toml and .pi/fort.d already exist");
+					} else {
 						// Activate for this session too
 						sessionOverride = true;
 						pi.appendEntry(SESSION_ENTRY_TYPE, true);
-					} else {
-						messages.push(".pi/fort.toml already exists");
 					}
 
 					ctx.ui.notify(`🧊 ${messages.join("\n")}`);
 
-					if (createdProject) {
+					if (created.length > 0) {
 						ctx.ui.notify("Reload with /reload to apply the new config.", "info");
 					}
 					break;

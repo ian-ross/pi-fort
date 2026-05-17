@@ -38,24 +38,22 @@ The core security property: **secrets never enter the VM**. Secrets configured i
 /fort init
 ```
 
-This creates:
-- `~/.pi/agent/extensions/pi-fort.toml` — global config (env vars, base packages)
-- `~/.pi/agent/extensions/pi-fort.d/` — drop-in files (git, jj, GitHub)
-- `.pi/fort.toml` — project config with `enabled = true`
+This creates project-local configuration only:
+- `.pi/fort.toml` — project config with `enabled = true`, base packages, and env vars
+- `.pi/fort.d/` — drop-in files for git and GitHub
 
 Once enabled, all tools (bash, read, write, edit) execute inside the VM automatically.
 
 ## Drop-in files
 
-Service integrations live in `pi-fort.d/` as self-contained TOML files. Each can contribute packages, setup scripts, secrets, and host policies. Delete a file to disable that integration.
+Service integrations live in `.pi/fort.d/` as self-contained TOML files. Each can contribute packages, setup scripts, secrets, and host policies. Delete a file to disable that integration.
 
 ```
-~/.pi/agent/extensions/
-├── pi-fort.toml              # base config: curl, jq, env vars
-└── pi-fort.d/
-    ├── git.toml                 # git + user identity
-    ├── github.toml              # github-cli + secrets + policies
-    └── jj.toml                  # jujutsu + user identity
+.pi/
+├── fort.toml               # base config: git, curl, jq, env vars
+└── fort.d/
+    ├── git.toml            # git + user identity
+    └── github.toml         # github-cli + secrets + policies
 ```
 
 Example drop-in (`git.toml`):
@@ -148,7 +146,7 @@ The workspace directory is mounted automatically. Use `mounts` for directories o
 mounts = ["../.jj", "../.git"]
 ```
 
-Absolute and `~`-prefixed paths also work (useful in global config):
+Absolute and `~`-prefixed paths also work:
 
 ```toml
 mounts = ["~/shared/data"]
@@ -165,7 +163,12 @@ mounts = [
 
 ### Config layering
 
-Two locations: global (`~/.pi/agent/extensions/pi-fort.toml` + drop-ins) and project (`.pi/fort.toml`). Project overrides global. `image` uses the last configured value. Packages accumulate across all layers; secrets, hosts, and env merge by key (later wins).
+pi-fort loads configuration from the current project only. Merge order is:
+
+1. `.pi/fort.toml`
+2. `.pi/fort.d/*.toml` in alphabetical order
+
+`image` uses the last configured value. Packages accumulate across all layers; secrets, hosts, and env merge by key (later wins). Old global config files under `~/.pi/agent/extensions/` are ignored.
 
 ```toml
 # .pi/fort.toml — allow all GitHub operations in this project
@@ -180,8 +183,8 @@ unmatched = "allow"
 | Command | Description |
 |---------|-------------|
 | `/fort` or `/fort status` | Show VM state, packages, secrets |
-| `/fort init` | Create project and global config files, enable fort |
+| `/fort init` | Create project config files, enable fort |
 | `/fort on` | Enable VM isolation for this session |
 | `/fort off` | Disable VM isolation for this session (shuts down VM) |
 | `/fort restart` | Restart VM on next tool use |
-| `/fort add <package>` | Search for and install a distro-native package |
+| `/fort add <package>` | Search for, install, and save a distro-native package to `.pi/fort.toml` |

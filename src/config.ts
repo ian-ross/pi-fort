@@ -1,7 +1,7 @@
 /**
  * Configuration schema and resolution for pi-fort.
  *
- * Config is TOML, loaded from cascading `.pi/fort.toml` files on the host.
+ * Config is TOML, loaded from `.pi/fort.toml` and `.pi/fort.d/*.toml` in the current project.
  * The agent never influences config resolution.
  */
 
@@ -175,21 +175,23 @@ function readTomlFile(path: string): FortFileConfig | undefined {
 }
 
 /**
- * Collect config files: global config + drop-ins, then project config.
- * Two locations, predictable merge order.
+ * Collect config files from the current project only.
+ *
+ * Merge order:
+ * 1. `.pi/fort.toml`
+ * 2. `.pi/fort.d/*.toml` in alphabetical order
  */
 export function collectConfigFiles(cwd: string): { path: string; config: FortFileConfig }[] {
 	const layers: { path: string; config: FortFileConfig }[] = [];
+	const projectDir = resolve(cwd);
 
-	// Global config
-	const globalPath = globalConfigPath();
-	const globalConfig = readTomlFile(globalPath);
-	if (globalConfig) {
-		layers.push({ path: globalPath, config: globalConfig });
+	const mainPath = projectConfigPath(projectDir);
+	const mainConfig = readTomlFile(mainPath);
+	if (mainConfig) {
+		layers.push({ path: mainPath, config: mainConfig });
 	}
 
-	// Drop-in configs from pi-fort.d/ (alphabetical order)
-	const dropInDir = globalDropInDir();
+	const dropInDir = projectDropInDir(projectDir);
 	if (existsSync(dropInDir)) {
 		const files = readdirSync(dropInDir)
 			.filter((f) => f.endsWith(".toml"))
@@ -201,13 +203,6 @@ export function collectConfigFiles(cwd: string): { path: string; config: FortFil
 				layers.push({ path: filePath, config });
 			}
 		}
-	}
-
-	// Project config
-	const projectPath = join(resolve(cwd), ".pi", "fort.toml");
-	const projectConfig = readTomlFile(projectPath);
-	if (projectConfig) {
-		layers.push({ path: projectPath, config: projectConfig });
 	}
 
 	return layers;
@@ -342,52 +337,46 @@ export function resolveHostPolicies(config: FortFileConfig): Map<string, Resolve
 export function loadConfig(cwd: string): {
 	merged: FortFileConfig;
 	policies: Map<string, ResolvedHostPolicy>;
-	hasGlobalConfig: boolean;
 	hasProjectConfig: boolean;
 	dropIns: string[];
 } {
-	const layers = collectConfigFiles(cwd);
+	const projectDir = resolve(cwd);
+	const layers = collectConfigFiles(projectDir);
 	const merged = mergeConfigs(layers.map((l) => l.config));
 	const policies = resolveHostPolicies(merged);
 
-	const hasGlobalConfig = layers.some((l) => l.path === globalConfigPath());
-	const projectPath = join(cwd, ".pi", "fort.toml");
+	const projectPath = projectConfigPath(projectDir);
 	const hasProjectConfig = layers.some((l) => l.path === projectPath);
 
-	// Collect drop-in file names (without extension, for display)
-	const dropInPrefix = globalDropInDir();
+	// Collect project drop-in file names (without extension, for display)
+	const dropInPrefix = `${projectDropInDir(projectDir)}/`;
 	const dropIns = layers.filter((l) => l.path.startsWith(dropInPrefix)).map((l) => basename(l.path, ".toml"));
 
 	// Resolve mount paths: expand ~, resolve relative paths against cwd
 	if (merged.mounts) {
 		const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
-		const resolvedCwd = resolve(cwd);
 		merged.mounts = merged.mounts.map((m) => {
 			let p = m.path;
 			if (p === "~") p = home;
 			else if (p.startsWith("~/")) p = join(home, p.slice(2));
-			else if (!p.startsWith("/")) p = join(resolvedCwd, p);
+			else if (!p.startsWith("/")) p = join(projectDir, p);
 			return { ...m, path: p };
 		});
 	}
 
-	return { merged, policies, hasGlobalConfig, hasProjectConfig, dropIns };
+	return { merged, policies, hasProjectConfig, dropIns };
 }
 
 // ---------------------------------------------------------------------------
 // Config paths and modification
 // ---------------------------------------------------------------------------
 
-export function globalConfigPath(): string {
-	return join(process.env.HOME ?? process.env.USERPROFILE ?? "~", ".pi", "agent", "extensions", "pi-fort.toml");
-}
-
-export function globalDropInDir(): string {
-	return join(process.env.HOME ?? process.env.USERPROFILE ?? "~", ".pi", "agent", "extensions", "pi-fort.d");
-}
-
 export function projectConfigPath(cwd: string): string {
-	return join(cwd, ".pi", "fort.toml");
+	return join(resolve(cwd), ".pi", "fort.toml");
+}
+
+export function projectDropInDir(cwd: string): string {
+	return join(resolve(cwd), ".pi", "fort.d");
 }
 
 /** Replace the home directory prefix with ~ for display. */
@@ -404,24 +393,23 @@ export function tildify(p: string): string {
 // ---------------------------------------------------------------------------
 
 /**
- * Create the global config and drop-in directory if they don't exist.
+ * Create the project config and drop-in directory if they don't exist.
  * Copies from templates/. Returns list of created files for display.
  */
-export function ensureGlobalConfig(): string[] {
+export function initProjectConfig(cwd: string): string[] {
 	const created: string[] = [];
 
-	const configPath = globalConfigPath();
+	const configPath = projectConfigPath(cwd);
 	if (!existsSync(configPath)) {
 		mkdirSync(dirname(configPath), { recursive: true });
-		cpSync(templatePath("pi-fort.toml"), configPath);
+		cpSync(templatePath("fort.toml"), configPath);
 		created.push(configPath);
 	}
 
-	const dropInDir = globalDropInDir();
+	const dropInDir = projectDropInDir(cwd);
 	mkdirSync(dropInDir, { recursive: true });
 
-	// Copy all template drop-in files that don't already exist
-	const templateDropInDir = templatePath("pi-fort.d");
+	const templateDropInDir = templatePath("fort.d");
 	for (const file of readdirSync(templateDropInDir).filter((f) => f.endsWith(".toml"))) {
 		const dest = join(dropInDir, file);
 		if (!existsSync(dest)) {
@@ -434,24 +422,11 @@ export function ensureGlobalConfig(): string[] {
 }
 
 /**
- * Create the project config with enabled = true.
- * Returns true if the file was created.
- */
-export function initProjectConfig(cwd: string): boolean {
-	const configPath = projectConfigPath(cwd);
-	if (existsSync(configPath)) return false;
-	const dir = dirname(configPath);
-	mkdirSync(dir, { recursive: true });
-	cpSync(templatePath("project.toml"), configPath);
-	return true;
-}
-
-/**
  * Persist a package in config so future fort starts install it automatically.
  * Creates the config file if needed.
  */
-export function addPackageToConfig(cwd: string, pkg: string, target: "project" | "global"): void {
-	const configPath = target === "global" ? globalConfigPath() : projectConfigPath(cwd);
+export function addPackageToConfig(cwd: string, pkg: string): void {
+	const configPath = projectConfigPath(cwd);
 
 	let existing: Partial<FortFileConfig> = {};
 	try {
