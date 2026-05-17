@@ -128,7 +128,7 @@ By default, pi-fort only allows HTTP egress to explicitly configured hosts: secr
 allow_egress = true
 ```
 
-Internal/private IP ranges remain blocked.
+Internal/private IP ranges remain blocked. DNS inside the VM uses Gondolin synthetic DNS: normal tools can resolve hostnames, but HTTP/TLS policy and upstream resolution are still enforced on the host side.
 
 ### Host policies
 

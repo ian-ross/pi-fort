@@ -250,6 +250,9 @@ export class FortVM {
 				...(this.options.image ? { imagePath: this.options.image } : {}),
 				qemuPath,
 			},
+			dns: {
+				mode: "synthetic",
+			},
 			httpHooks,
 			env: {
 				...env,
