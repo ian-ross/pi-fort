@@ -88,12 +88,18 @@ const HostDef = v.object({
 });
 export type HostDef = v.InferOutput<typeof HostDef>;
 
-/** Additional directory to mount in the VM. Bare string = read-write mount. */
+const AbsoluteGuestPath = v.pipe(
+	v.string(),
+	v.check((path) => path.startsWith("/"), "mount target must be an absolute guest path"),
+);
+
+/** Additional directory to mount in the VM. Bare string = read-write mount at the same path. */
 const MountDef = v.pipe(
 	v.union([
 		v.string(),
 		v.object({
 			path: v.string(),
+			target: v.optional(AbsoluteGuestPath),
 			readonly: v.optional(v.boolean(), false),
 		}),
 	]),
@@ -229,7 +235,7 @@ export function mergeConfigs(layers: FortFileConfig[]): FortFileConfig {
 	};
 
 	// Track mounts and git-credentials by key to deduplicate (later layer wins)
-	const mountsByPath = new Map<string, { path: string; readonly: boolean }>();
+	const mountsByTarget = new Map<string, { path: string; target?: string; readonly: boolean }>();
 	const gitCredsByHost = new Map<string, GitCredentialDef>();
 	// Collect setup scripts in order (each file's script runs sequentially)
 	const setupScripts: string[] = [];
@@ -256,7 +262,7 @@ export function mergeConfigs(layers: FortFileConfig[]): FortFileConfig {
 		}
 		if (layer.mounts) {
 			for (const mount of layer.mounts) {
-				mountsByPath.set(mount.path, mount);
+				mountsByTarget.set(mount.target ?? mount.path, mount);
 			}
 		}
 		if (layer.env) {
@@ -284,7 +290,7 @@ export function mergeConfigs(layers: FortFileConfig[]): FortFileConfig {
 		}
 	}
 
-	merged.mounts = [...mountsByPath.values()];
+	merged.mounts = [...mountsByTarget.values()];
 	merged["git-credentials"] = [...gitCredsByHost.values()];
 	// Concatenate all setup scripts (each separated by newline)
 	if (setupScripts.length > 0) {

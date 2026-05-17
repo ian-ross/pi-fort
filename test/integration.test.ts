@@ -202,6 +202,21 @@ describe("mount path resolution", () => {
 		expect(merged.mounts?.[0]?.path).toBe(join(tmpDir, "shared/data"));
 	});
 
+	it("preserves absolute guest target paths", () => {
+		const projectDir = join(tmpDir, "project");
+		mkdirSync(join(projectDir, ".pi"), { recursive: true });
+		writeFileSync(
+			join(projectDir, ".pi", "fort.toml"),
+			'enabled = true\n\n[[mounts]]\npath = "../shared/config"\ntarget = "/mnt/config"\nreadonly = true\n',
+		);
+		const { merged } = loadConfig(projectDir);
+		expect(merged.mounts?.[0]).toEqual({
+			path: join(tmpDir, "shared/config"),
+			target: "/mnt/config",
+			readonly: true,
+		});
+	});
+
 	it("leaves absolute paths unchanged", () => {
 		const projectDir = join(tmpDir, "project");
 		mkdirSync(join(projectDir, ".pi"), { recursive: true });

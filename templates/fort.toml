@@ -20,8 +20,9 @@ enabled = true
 packages = ["git", "curl", "jq"]
 
 # Mount directories outside the workspace (relative paths ok, supports ~).
-# Missing paths are silently skipped.
-# mounts = ["../.git"]
+# Missing paths are silently skipped. Bare string mounts appear at the same
+# path inside the VM. Use object form to set readonly or a guest target path.
+# mounts = ["../.git", { path = "~/shared/configs", target = "/mnt/configs", readonly = true }]
 
 # Environment variables available in the VM and setup scripts.
 # Values can be static strings, host commands, or host env vars.

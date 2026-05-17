@@ -149,7 +149,7 @@ GraphQL policy parses the request body and checks actual field names (not the sp
 
 ### Mounts
 
-The workspace directory is mounted automatically. Use `mounts` for directories outside it, like a jj/git repo root that is a parent of the workspace. Relative paths are resolved against the workspace directory. Missing paths are silently skipped, so optional mounts are safe to declare unconditionally:
+The workspace directory is mounted automatically at the same path inside the VM. Use `mounts` for directories outside it, like a jj/git repo root that is a parent of the workspace. Relative host paths are resolved against the workspace directory. Missing host paths are silently skipped, so optional mounts are safe to declare unconditionally:
 
 ```toml
 # In .pi/fort.toml (project config)
@@ -162,12 +162,12 @@ Absolute and `~`-prefixed paths also work:
 mounts = ["~/shared/data"]
 ```
 
-For read-only mounts, use the object form:
+Bare string mounts appear at the same path inside the VM and are read-write. Use the object form for read-only mounts or to choose a different guest path with `target`:
 
 ```toml
 mounts = [
   "../.jj",
-  { path = "~/shared/configs", readonly = true },
+  { path = "~/shared/configs", target = "/mnt/configs", readonly = true },
 ]
 ```
 

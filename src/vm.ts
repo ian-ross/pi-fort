@@ -14,6 +14,7 @@ import {
 	createHttpHooks,
 	createShadowPathPredicate,
 	type ExecResult,
+	ReadonlyProvider,
 	RealFSProvider,
 	type SecretDefinition,
 	ShadowProvider,
@@ -26,8 +27,44 @@ import { type Distro, getPackageManager, shellEscape } from "./package-manager.j
 import { evaluateRequest } from "./policy.js";
 
 export interface ExtraMount {
+	/** Host path to expose in the VM */
 	path: string;
+	/** Guest path where the host path is mounted. Defaults to path. */
+	target?: string;
 	readonly: boolean;
+}
+
+export type FortVfsMounts = Record<string, RealFSProvider | ReadonlyProvider | ShadowProvider>;
+
+/**
+ * Build the Gondolin VFS mount map for the workspace and configured extra mounts.
+ * The workspace is mounted at the same path as the host workspace; extra mounts
+ * default to the same guest path but may specify a separate target path.
+ */
+export function createVfsMounts(workspaceDir: string, extraMounts: ExtraMount[]): FortVfsMounts {
+	// Build VFS: mount workspace at the same path as on the host.
+	// This makes the VM transparent: paths match between host and guest.
+	const realFs = new RealFSProvider(workspaceDir);
+	const shadowedFs = new ShadowProvider(realFs, {
+		shouldShadow: createShadowPathPredicate(["/.pi/fort.toml"]),
+		writeMode: "deny",
+	});
+
+	const mounts: FortVfsMounts = {
+		[workspaceDir]: shadowedFs,
+	};
+
+	// Extra mounts (e.g. jj repo root, shared directories).
+	// Skip paths that don't exist on the host (common with optional mounts like .jj/.git).
+	for (const extra of extraMounts) {
+		const target = extra.target ?? extra.path;
+		if (mounts[target]) continue; // target already mounted
+		if (!existsSync(extra.path)) continue;
+		const provider = new RealFSProvider(extra.path);
+		mounts[target] = extra.readonly ? new ReadonlyProvider(provider) : provider;
+	}
+
+	return mounts;
 }
 
 export interface FortVMOptions {
@@ -210,33 +247,7 @@ export class FortVM {
 
 		const { httpHooks, env } = createHttpHooks(hookOptions);
 
-		// Build VFS: mount workspace at the same path as on the host.
-		// This makes the VM transparent: paths match between host and guest.
-		const realFs = new RealFSProvider(workspaceDir);
-		const shadowedFs = new ShadowProvider(realFs, {
-			shouldShadow: createShadowPathPredicate(["/.pi/fort.toml"]),
-			writeMode: "deny",
-		});
-
-		const mounts: Record<string, RealFSProvider | ShadowProvider> = {
-			[workspaceDir]: shadowedFs,
-		};
-
-		// Extra mounts (e.g. jj repo root, shared directories).
-		// Skip paths that don't exist on the host (common with optional mounts like .jj/.git).
-		for (const extra of this.options.extraMounts) {
-			if (mounts[extra.path]) continue; // workspace already mounted
-			if (!existsSync(extra.path)) continue;
-			const provider = new RealFSProvider(extra.path);
-			if (extra.readonly) {
-				mounts[extra.path] = new ShadowProvider(provider, {
-					shouldShadow: () => true,
-					writeMode: "deny",
-				});
-			} else {
-				mounts[extra.path] = provider;
-			}
-		}
+		const mounts = createVfsMounts(workspaceDir, this.options.extraMounts);
 
 		// Create and start VM. Pass qemuPath explicitly so the preflight
 		// check and Gondolin launch use the same architecture-specific binary.

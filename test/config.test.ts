@@ -177,7 +177,7 @@ describe("mergeConfigs", () => {
 		expect(result.secrets?.GH_TOKEN).toBe(false);
 	});
 
-	it("mounts accumulate across layers, later wins on same path", () => {
+	it("mounts accumulate across layers, later wins on same target", () => {
 		const result = mergeConfigs([
 			v.parse(FortFileConfig, {
 				mounts: [{ path: "/home/user/.jj", readonly: false }],
@@ -189,6 +189,18 @@ describe("mergeConfigs", () => {
 		expect(result.mounts).toHaveLength(2);
 		expect(result.mounts).toContainEqual({ path: "/home/user/.jj", readonly: true });
 		expect(result.mounts).toContainEqual({ path: "/home/user/other", readonly: false });
+	});
+
+	it("mounts with the same target are overridden by later layers", () => {
+		const result = mergeConfigs([
+			v.parse(FortFileConfig, {
+				mounts: [{ path: "/home/user/config-v1", target: "/mnt/config", readonly: false }],
+			}),
+			v.parse(FortFileConfig, {
+				mounts: [{ path: "/home/user/config-v2", target: "/mnt/config", readonly: true }],
+			}),
+		]);
+		expect(result.mounts).toEqual([{ path: "/home/user/config-v2", target: "/mnt/config", readonly: true }]);
 	});
 
 	it("mounts accept bare strings as read-write mounts", () => {
@@ -211,6 +223,21 @@ describe("mergeConfigs", () => {
 		expect(result.mounts).toHaveLength(2);
 		expect(result.mounts).toContainEqual({ path: "/home/user/.jj", readonly: false });
 		expect(result.mounts).toContainEqual({ path: "/home/user/.git", readonly: true });
+	});
+
+	it("mounts accept absolute guest targets", () => {
+		const result = v.parse(FortFileConfig, {
+			mounts: [{ path: "/home/user/config", target: "/mnt/config", readonly: true }],
+		});
+		expect(result.mounts).toEqual([{ path: "/home/user/config", target: "/mnt/config", readonly: true }]);
+	});
+
+	it("mounts reject relative guest targets", () => {
+		expect(() =>
+			v.parse(FortFileConfig, {
+				mounts: [{ path: "/home/user/config", target: "mnt/config" }],
+			}),
+		).toThrow();
 	});
 
 	it("env merges by key, later wins", () => {
