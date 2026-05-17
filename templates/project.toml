@@ -1,0 +1,7 @@
+# pi-fort: run tools in an isolated VM
+# Protects API keys and isolates file access.
+enabled = true
+
+# Mount directories outside the workspace (relative paths ok, supports ~).
+# Missing paths are silently skipped.
+# mounts = ["../.jj", "../.git"]

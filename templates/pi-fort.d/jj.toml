@@ -1,0 +1,9 @@
+# Jujutsu (jj) support for pi-fort
+# If the jj repo root is above your workspace, mount it in your project config:
+#
+# mounts = ["../.jj"]
+packages = ["jujutsu"]
+setup = """
+jj config set --user user.name "$USER_NAME"
+jj config set --user user.email "$USER_EMAIL"
+"""
