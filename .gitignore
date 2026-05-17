@@ -1,10 +1,4 @@
 node_modules/
 dist/
 .vitest/
-.yarn/*
-!.yarn/releases
-!.yarn/plugins
-!.yarn/sdks
-!.yarn/versions
-.pnp.*
 .DS_Store
