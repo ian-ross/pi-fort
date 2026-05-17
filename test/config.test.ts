@@ -6,6 +6,7 @@ describe("FortFileConfig schema", () => {
 	it("accepts empty config", () => {
 		const result = v.parse(FortFileConfig, {});
 		expect(result.enabled).toBeUndefined();
+		expect(result.allow_egress).toBeUndefined();
 		expect(result.packages).toBeUndefined();
 		expect(result.secrets).toEqual({});
 		expect(result.hosts).toEqual({});
@@ -33,6 +34,7 @@ describe("FortFileConfig schema", () => {
 	it("accepts full config", () => {
 		const result = v.parse(FortFileConfig, {
 			enabled: true,
+			allow_egress: true,
 			packages: ["git", "curl", "ripgrep"],
 			secrets: {
 				GH_TOKEN: { command: "gh auth token", hosts: ["api.github.com"] },
@@ -51,6 +53,7 @@ describe("FortFileConfig schema", () => {
 			},
 		});
 
+		expect(result.allow_egress).toBe(true);
 		expect(result.packages).toEqual(["git", "curl", "ripgrep"]);
 		expect(result.secrets?.GH_TOKEN).toEqual({
 			command: "gh auth token",
@@ -92,6 +95,7 @@ describe("mergeConfigs", () => {
 	it("returns defaults with empty layers", () => {
 		const result = mergeConfigs([]);
 		expect(result.distro).toBe("alpine");
+		expect(result.allow_egress).toBe(false);
 		expect(result.packages).toEqual([]);
 		expect(result.secrets).toEqual({});
 		expect(result.hosts).toEqual({});
@@ -103,6 +107,14 @@ describe("mergeConfigs", () => {
 			v.parse(FortFileConfig, { enabled: true }),
 		]);
 		expect(result.enabled).toBe(true);
+	});
+
+	it("later allow_egress wins", () => {
+		const result = mergeConfigs([
+			v.parse(FortFileConfig, { allow_egress: false }),
+			v.parse(FortFileConfig, { allow_egress: true }),
+		]);
+		expect(result.allow_egress).toBe(true);
 	});
 
 	it("later distro wins", () => {

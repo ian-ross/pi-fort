@@ -44,6 +44,7 @@ describe("initProjectConfig", () => {
 
 		const content = readFileSync(join(projectDir, ".pi", "fort.toml"), "utf-8");
 		expect(content).toContain("enabled = true");
+		expect(content).toContain("# allow_egress = false");
 		expect(content).toContain('packages = ["git", "curl", "jq"]');
 	});
 

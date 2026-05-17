@@ -49,7 +49,7 @@ export interface FortVMOptions {
 	extraEnv: Record<string, string>;
 	/** Concatenated setup scripts to run after package install */
 	setupScript: string | undefined;
-	/** Host allowlist (undefined = allow all) */
+	/** HTTP egress host allowlist (undefined = allow all) */
 	allowedHosts: string[] | undefined;
 	/** Per-host HTTP policies */
 	policies: Map<string, ResolvedHostPolicy>;
@@ -106,14 +106,11 @@ export class FortVM {
 			blockInternalRanges: true,
 		};
 
-		// Gondolin's createHttpHooks builds an allowlist from secret hosts.
-		// If that list is non-empty, only those hosts are reachable.
-		// We must always include distro package repository hosts and, when the
-		// user configured an explicit allowlist, merge that in too.
-		const secretHosts = secrets.flatMap((s) => s.hosts);
-		const needsAllowlist = allowedHosts || secretHosts.length > 0;
-		if (needsAllowlist) {
-			hookOptions.allowedHosts = [...(allowedHosts ?? []), ...packageManager.packageHosts, ...secretHosts];
+		// undefined allowedHosts means allow all HTTP egress (while still blocking
+		// internal ranges). Otherwise, merge in distro package repository hosts so
+		// setup/package installation can work under pi-fort's default deny egress.
+		if (allowedHosts) {
+			hookOptions.allowedHosts = [...allowedHosts, ...packageManager.packageHosts];
 		}
 
 		// Policy enforcement via isRequestAllowed (method + path).

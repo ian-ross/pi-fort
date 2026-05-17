@@ -111,6 +111,7 @@ export type GitCredentialDef = v.InferOutput<typeof GitCredentialDef>;
 /** Top-level fort config file schema. */
 export const FortFileConfig = v.object({
 	enabled: v.optional(v.boolean()),
+	allow_egress: v.optional(v.boolean()),
 	image: v.optional(v.string()),
 	distro: v.optional(v.picklist(Distros)),
 	packages: v.optional(v.array(v.string())),
@@ -216,6 +217,7 @@ export function collectConfigFiles(cwd: string): { path: string; config: FortFil
 export function mergeConfigs(layers: FortFileConfig[]): FortFileConfig {
 	const merged: FortFileConfig = {
 		enabled: undefined,
+		allow_egress: false,
 		image: undefined,
 		distro: "alpine",
 		packages: [],
@@ -235,6 +237,9 @@ export function mergeConfigs(layers: FortFileConfig[]): FortFileConfig {
 	for (const layer of layers) {
 		if (layer.enabled !== undefined) {
 			merged.enabled = layer.enabled;
+		}
+		if (layer.allow_egress !== undefined) {
+			merged.allow_egress = layer.allow_egress;
 		}
 		if (layer.image !== undefined) {
 			merged.image = layer.image;

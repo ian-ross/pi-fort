@@ -120,9 +120,19 @@ username = "x-access-token"
 secret = "GH_TOKEN"
 ```
 
+### HTTP egress
+
+By default, pi-fort only allows HTTP egress to explicitly configured hosts: secret host scopes, `[hosts]` policy entries, and package repository hosts needed for setup. Set `allow_egress = true` to allow HTTP requests to any public host while still applying method/path/GraphQL restrictions to hosts explicitly listed under `[hosts]`.
+
+```toml
+allow_egress = true
+```
+
+Internal/private IP ranges remain blocked.
+
 ### Host policies
 
-Access control per host. `unmatched` determines what happens to requests that don't match any allow/deny rule.
+Access control per configured host. `unmatched` determines what happens to requests that don't match any allow/deny rule.
 
 ```toml
 [hosts."api.github.com"]
@@ -168,7 +178,7 @@ pi-fort loads configuration from the current project only. Merge order is:
 1. `.pi/fort.toml`
 2. `.pi/fort.d/*.toml` in alphabetical order
 
-`image` uses the last configured value. Packages accumulate across all layers; secrets, hosts, and env merge by key (later wins). Old global config files under `~/.pi/agent/extensions/` are ignored.
+`image` and `allow_egress` use the last configured value. Packages accumulate across all layers; secrets, hosts, and env merge by key (later wins). Old global config files under `~/.pi/agent/extensions/` are ignored.
 
 ```toml
 # .pi/fort.toml — allow all GitHub operations in this project

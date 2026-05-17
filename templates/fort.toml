@@ -4,6 +4,12 @@
 # Enable pi-fort for this project.
 enabled = true
 
+# HTTP egress policy. By default, only configured secret/policy hosts
+# plus package repository hosts are reachable. Set to true to allow
+# HTTP egress to any public host while still applying policies to
+# hosts listed in [hosts].
+# allow_egress = false
+
 # Optional guest distro and custom Gondolin image tag or asset path.
 # Alpine is the default. Use distro = "debian" with a custom Debian image.
 # Package names are distro-native; edit drop-ins when switching distros.

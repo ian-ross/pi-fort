@@ -121,8 +121,7 @@ export default function (pi: ExtensionAPI) {
 	const packages = merged.packages ?? [];
 	const extraMounts = merged.mounts ?? [];
 	const gitCredentials = merged["git-credentials"] ?? [];
-	// Network allowlist is derived from secret hosts (Gondolin builds the allowlist)
-	const allowedHosts: string[] | undefined = undefined;
+	const allowEgress = merged.allow_egress ?? false;
 
 	// Resolve env vars from config (non-secret, injected as real VM env vars)
 	const extraEnv = resolveEnv(merged.env);
@@ -137,6 +136,10 @@ export default function (pi: ExtensionAPI) {
 		});
 		return;
 	}
+
+	const policyHosts = [...policies.keys()];
+	const secretHosts = secrets.flatMap((s) => s.hosts);
+	const allowedHosts = allowEgress ? undefined : [...new Set([...secretHosts, ...policyHosts])];
 
 	// -----------------------------------------------------------------------
 	// Activation state
@@ -372,6 +375,8 @@ export default function (pi: ExtensionAPI) {
 
 					const envNames = Object.keys(extraEnv).join(", ");
 					if (envNames) lines.push(`Env:       ${envNames}`);
+
+					lines.push(`Egress:    ${allowEgress ? "allow all HTTP hosts" : "configured hosts only"}`);
 
 					const hostNames = [...policies.keys()].join(", ");
 					if (hostNames) lines.push(`Policies:  ${hostNames}`);
