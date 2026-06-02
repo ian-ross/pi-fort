@@ -10,6 +10,7 @@ import { ExtensionAPI } from '@earendil-works/pi-coding-agent';
  * See README.md for architecture and configuration details.
  */
 
+declare function parseFortArgs(args: string): string[];
 declare function export_default(pi: ExtensionAPI): void;
 
-export { export_default as default };
+export { export_default as default, parseFortArgs };

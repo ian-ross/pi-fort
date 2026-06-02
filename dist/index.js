@@ -1,9 +1,10 @@
 // src/index.ts
+import { existsSync as existsSync3 } from "fs";
 import { createBashTool, createEditTool, createReadTool, createWriteTool } from "@earendil-works/pi-coding-agent";
 
 // src/config.ts
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "fs";
-import { basename, dirname, join, resolve } from "path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "path";
 import { fileURLToPath } from "url";
 import { parse as parseTOML } from "smol-toml";
 import * as v from "valibot";
@@ -192,10 +193,6 @@ function collectConfigFiles(cwd) {
   const layers = [];
   const projectDir = resolve(cwd);
   const mainPath = projectConfigPath(projectDir);
-  const mainConfig = readTomlFile(mainPath);
-  if (mainConfig) {
-    layers.push({ path: mainPath, config: mainConfig });
-  }
   const dropInDir = projectDropInDir(projectDir);
   if (existsSync(dropInDir)) {
     const files = readdirSync(dropInDir).filter((f) => f.endsWith(".toml")).sort();
@@ -207,10 +204,22 @@ function collectConfigFiles(cwd) {
       }
     }
   }
+  const mainConfig = readTomlFile(mainPath);
+  if (mainConfig) {
+    layers.push({ path: mainPath, config: mainConfig });
+  }
   return layers;
 }
 function isPathLikeImage(image) {
   return image === "~" || image.startsWith("~/") || image.startsWith("./") || image.startsWith("../") || image.startsWith("/");
+}
+function resolveConfigPath(path2, configPath) {
+  const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
+  if (path2 === "~") return home;
+  if (path2.startsWith("~/")) return join(home, path2.slice(2));
+  if (path2.startsWith("/")) return path2;
+  if (!configPath) return path2;
+  return resolve(dirname(configPath), path2);
 }
 function resolveImagePath(image, configPath) {
   if (!isPathLikeImage(image)) return image;
@@ -261,7 +270,8 @@ function mergeConfigs(layers) {
     }
     if (layer.mounts) {
       for (const mount of layer.mounts) {
-        mountsByTarget.set(mount.target ?? mount.path, mount);
+        const resolvedMount = { ...mount, path: resolveConfigPath(mount.path, layerPath) };
+        mountsByTarget.set(resolvedMount.target ?? resolvedMount.path, resolvedMount);
       }
     }
     if (layer.env) {
@@ -334,16 +344,6 @@ function loadConfig(cwd) {
   const hasProjectConfig = layers.some((l) => l.path === projectPath);
   const dropInPrefix = `${projectDropInDir(projectDir)}/`;
   const dropIns = layers.filter((l) => l.path.startsWith(dropInPrefix)).map((l) => basename(l.path, ".toml"));
-  if (merged.mounts) {
-    const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
-    merged.mounts = merged.mounts.map((m) => {
-      let p = m.path;
-      if (p === "~") p = home;
-      else if (p.startsWith("~/")) p = join(home, p.slice(2));
-      else if (!p.startsWith("/")) p = join(projectDir, p);
-      return { ...m, path: p };
-    });
-  }
   return { merged, policies, hasProjectConfig, dropIns };
 }
 function projectConfigPath(cwd) {
@@ -408,6 +408,183 @@ ${raw}`, "utf-8");
     writeFileSync(configPath, `${packagesLine}
 `, "utf-8");
   }
+}
+function requireProjectConfig(cwd) {
+  const configPath = projectConfigPath(cwd);
+  if (!existsSync(configPath)) {
+    throw new Error("pi-fort needs to be initialized first. Run /fort init.");
+  }
+  return configPath;
+}
+function readProjectConfigForEdit(cwd) {
+  const configPath = requireProjectConfig(cwd);
+  const raw = readFileSync(configPath, "utf-8");
+  const parsed = parseTOML(raw);
+  const config = v.parse(FortFileConfig, parsed);
+  return { configPath, raw, config };
+}
+function tomlString(value) {
+  return JSON.stringify(value);
+}
+function topLevelScalarLine(key, value) {
+  return `${key} = ${value}`;
+}
+function upsertTopLevelScalar(raw, key, value) {
+  const line = topLevelScalarLine(key, value);
+  const re = new RegExp(`^\\s*#?\\s*${key}\\s*=.*$`, "m");
+  if (re.test(raw)) return raw.replace(re, line);
+  return raw.endsWith("\n") ? `${raw}${line}
+` : `${raw}
+${line}
+`;
+}
+function removeTopLevelScalar(raw, key) {
+  return raw.replace(new RegExp(`^\\s*${key}\\s*=.*(?:\\n|$)`, "m"), "");
+}
+function bracketBalance(line) {
+  let balance = 0;
+  let quote;
+  let escaped = false;
+  for (const ch of line) {
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (quote === '"' && ch === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (ch === quote) quote = void 0;
+      continue;
+    }
+    if (ch === '"' || ch === "'") quote = ch;
+    else if (ch === "[") balance++;
+    else if (ch === "]") balance--;
+  }
+  return balance;
+}
+function replaceMountsBlock(raw, mounts) {
+  let lines = raw.split(/(?<=\n)/);
+  let start = -1;
+  let end = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (!/^\s*mounts\s*=/.test(lines[i])) continue;
+    start = i;
+    let balance = bracketBalance(lines[i]);
+    end = i;
+    while (balance > 0 && end + 1 < lines.length) {
+      end++;
+      balance += bracketBalance(lines[end]);
+    }
+    break;
+  }
+  const block = formatMountsBlock(mounts);
+  if (start >= 0) {
+    lines.splice(start, end - start + 1, block);
+    return lines.join("");
+  }
+  lines = lines.filter((line, index) => {
+    if (!/^\s*\[\[mounts\]\]\s*$/.test(line)) return true;
+    let next = index + 1;
+    while (next < lines.length && !/^\s*\[/.test(lines[next])) next++;
+    for (let i = index; i < next; i++) lines[i] = "";
+    return false;
+  });
+  const withoutMountTables = lines.join("");
+  return withoutMountTables.endsWith("\n") ? `${withoutMountTables}${block}` : `${withoutMountTables}
+${block}`;
+}
+function formatMountsBlock(mounts) {
+  if (mounts.length === 0) return "mounts = []\n";
+  const lines = ["mounts = ["];
+  for (const mount of mounts) {
+    const parts = [`path = ${tomlString(mount.path)}`];
+    if (mount.target) parts.push(`target = ${tomlString(mount.target)}`);
+    parts.push(`readonly = ${mount.readonly ? "true" : "false"}`);
+    lines.push(`	{ ${parts.join(", ")} },`);
+  }
+  lines.push("]");
+  return `${lines.join("\n")}
+`;
+}
+function storedPathForCommandInput(cwd, input) {
+  if (input === "~" || input.startsWith("~/") || isAbsolute(input)) return input;
+  const absolute = resolve(cwd, input);
+  return relative(dirname(projectConfigPath(cwd)), absolute) || ".";
+}
+function effectiveHostPathFromStored(cwd, storedPath) {
+  return resolveConfigPath(storedPath, projectConfigPath(cwd));
+}
+function effectiveHostPathForCommandInput(cwd, input) {
+  if (input === "~" || input.startsWith("~/")) return resolveConfigPath(input, projectConfigPath(cwd));
+  return isAbsolute(input) ? input : resolve(cwd, input);
+}
+function setNetworkConfig(cwd, allow) {
+  const { configPath, raw } = readProjectConfigForEdit(cwd);
+  writeFileSync(configPath, upsertTopLevelScalar(raw, "allow_egress", allow ? "true" : "false"), "utf-8");
+}
+function setContainerConfig(cwd, imagePath) {
+  const { configPath, raw } = readProjectConfigForEdit(cwd);
+  const stored = storedPathForCommandInput(cwd, imagePath);
+  let next = upsertTopLevelScalar(raw, "distro", tomlString("debian"));
+  next = upsertTopLevelScalar(next, "image", tomlString(stored));
+  writeFileSync(configPath, next, "utf-8");
+}
+function resetContainerConfig(cwd) {
+  const { configPath, raw } = readProjectConfigForEdit(cwd);
+  let next = removeTopLevelScalar(raw, "distro");
+  next = removeTopLevelScalar(next, "image");
+  writeFileSync(configPath, next, "utf-8");
+}
+function setMountConfig(cwd, hostPathInput, guestPath, readonly) {
+  const { configPath, raw, config } = readProjectConfigForEdit(cwd);
+  const storedHostPath = storedPathForCommandInput(cwd, hostPathInput);
+  const target = guestPath ?? effectiveHostPathForCommandInput(cwd, hostPathInput);
+  const currentMounts = config.mounts ?? [];
+  const nextMounts = currentMounts.filter((m) => (m.target ?? effectiveHostPathFromStored(cwd, m.path)) !== target);
+  const mount = { path: storedHostPath, readonly };
+  if (target !== effectiveHostPathForCommandInput(cwd, hostPathInput)) mount.target = target;
+  nextMounts.push(mount);
+  writeFileSync(configPath, replaceMountsBlock(raw, nextMounts), "utf-8");
+}
+function removeMountConfig(cwd, guestPath) {
+  const { configPath, raw, config } = readProjectConfigForEdit(cwd);
+  const currentMounts = config.mounts ?? [];
+  const nextMounts = currentMounts.filter((m) => (m.target ?? effectiveHostPathFromStored(cwd, m.path)) !== guestPath);
+  if (nextMounts.length === currentMounts.length) return false;
+  writeFileSync(configPath, replaceMountsBlock(raw, nextMounts), "utf-8");
+  return true;
+}
+function effectiveMounts(cwd) {
+  const projectDir = resolve(cwd);
+  const mountsByTarget = /* @__PURE__ */ new Map();
+  const layers = collectConfigFiles(projectDir);
+  for (const layer of layers) {
+    for (const mount of layer.config.mounts ?? []) {
+      const path2 = resolveConfigPath(mount.path, layer.path);
+      const target = mount.target ?? path2;
+      mountsByTarget.set(target, {
+        path: path2,
+        target,
+        readonly: mount.readonly,
+        source: layer.path,
+        exists: existsSync(path2),
+        builtIn: false
+      });
+    }
+  }
+  return [
+    {
+      path: projectDir,
+      target: projectDir,
+      readonly: false,
+      source: "built-in",
+      exists: existsSync(projectDir),
+      builtIn: true
+    },
+    ...mountsByTarget.values()
+  ];
 }
 
 // src/secrets.ts
@@ -971,6 +1148,51 @@ async function handleAddPackage(query, fortVm, cwd, ctx) {
   addPackageToConfig(cwd, targetPkg);
   ctx.ui.notify(`\u2705 Installed ${targetPkg} and added it to .pi/fort.toml`);
 }
+function parseFortArgs(args) {
+  const result = [];
+  let current = "";
+  let quote;
+  let escaped = false;
+  let inToken = false;
+  for (const ch of args.trim()) {
+    if (escaped) {
+      current += ch;
+      escaped = false;
+      inToken = true;
+      continue;
+    }
+    if (ch === "\\") {
+      escaped = true;
+      inToken = true;
+      continue;
+    }
+    if (quote) {
+      if (ch === quote) quote = void 0;
+      else current += ch;
+      inToken = true;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      inToken = true;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      if (inToken) {
+        result.push(current);
+        current = "";
+        inToken = false;
+      }
+      continue;
+    }
+    current += ch;
+    inToken = true;
+  }
+  if (escaped) current += "\\";
+  if (quote) throw new Error("Unterminated quote");
+  if (inToken) result.push(current);
+  return result;
+}
 var SESSION_ENTRY_TYPE = "fort:active";
 function index_default(pi) {
   const qemu = checkQemuAvailable();
@@ -981,32 +1203,35 @@ function index_default(pi) {
     return;
   }
   const localCwd = process.cwd();
-  const { merged, policies, hasProjectConfig, dropIns } = loadConfig(localCwd);
-  const image = merged.image;
-  const distro = merged.distro ?? "alpine";
-  const packages = merged.packages ?? [];
-  const extraMounts = merged.mounts ?? [];
-  const gitCredentials = merged["git-credentials"] ?? [];
-  const allowEgress = merged.allow_egress ?? false;
-  const extraEnv = resolveEnv(merged.env);
-  const setupScript = merged.setup;
-  let secrets;
+  function buildRuntimeConfig() {
+    const loaded = loadConfig(localCwd);
+    const secrets = resolveSecrets(loaded.merged.secrets);
+    const policyHosts = [...loaded.policies.keys()];
+    const secretHosts = secrets.flatMap((s) => s.hosts);
+    const allowEgress = loaded.merged.allow_egress ?? false;
+    return {
+      ...loaded,
+      secrets,
+      extraEnv: resolveEnv(loaded.merged.env),
+      allowedHosts: allowEgress ? void 0 : [.../* @__PURE__ */ new Set([...secretHosts, ...policyHosts])]
+    };
+  }
+  let runtime;
   try {
-    secrets = resolveSecrets(merged.secrets);
+    runtime = buildRuntimeConfig();
   } catch (err) {
     pi.on("session_start", (_event, ctx) => {
-      ctx.ui.notify(`pi-fort: failed to resolve secrets: ${err.message}`, "error");
+      ctx.ui.notify(`pi-fort: failed to load config: ${err.message}`, "error");
     });
     return;
   }
-  const policyHosts = [...policies.keys()];
-  const secretHosts = secrets.flatMap((s) => s.hosts);
-  const allowedHosts = allowEgress ? void 0 : [.../* @__PURE__ */ new Set([...secretHosts, ...policyHosts])];
-  const configEnabled = merged.enabled;
+  function reloadRuntimeConfig() {
+    runtime = buildRuntimeConfig();
+  }
   let sessionOverride;
   function isActive() {
     if (sessionOverride !== void 0) return sessionOverride;
-    return configEnabled === true;
+    return runtime.merged.enabled === true;
   }
   function getSessionActivation(ctx) {
     const entries = ctx.sessionManager.getEntries();
@@ -1035,16 +1260,16 @@ function index_default(pi) {
       ctx.ui.setStatus("fort", "\u{1F9CA} Starting VM...");
       const instance = new FortVM({
         workspaceDir: localCwd,
-        image,
-        distro,
-        packages,
-        extraMounts,
-        secrets,
-        gitCredentials,
-        extraEnv,
-        setupScript,
-        allowedHosts,
-        policies,
+        image: runtime.merged.image,
+        distro: runtime.merged.distro ?? "alpine",
+        packages: runtime.merged.packages ?? [],
+        extraMounts: runtime.merged.mounts ?? [],
+        secrets: runtime.secrets,
+        gitCredentials: runtime.merged["git-credentials"] ?? [],
+        extraEnv: runtime.extraEnv,
+        setupScript: runtime.merged.setup,
+        allowedHosts: runtime.allowedHosts,
+        policies: runtime.policies,
         onPolicyPrompt: async (method, url, hostname) => {
           if (!ctx.hasUI) return false;
           return ctx.ui.confirm(
@@ -1077,7 +1302,7 @@ Allow this request?`
       if (!isLastHintActive(ctx)) {
         sendFortHint();
       }
-    } else if (configEnabled === void 0 && sessionOverride === void 0) {
+    } else if (runtime.merged.enabled === void 0 && sessionOverride === void 0) {
       ctx.ui.notify("\u{1F9CA} pi-fort is installed but not enabled. Run /fort init to set up.");
     }
   });
@@ -1130,7 +1355,9 @@ Allow this request?`
     if (!fortVm?.isRunning) return;
     return { operations: createVmBashOps(fortVm.rawVm) };
   });
-  const FORT_HINT = `\u{1F9CA} Fort active. All tools are running inside an isolated ${getPackageManager(distro).label} VM. If a command is not found, install it with \`/fort add <package>\`. Package names are distro-native and may differ from binary names.`;
+  function fortHint() {
+    return `\u{1F9CA} Fort active. All tools are running inside an isolated ${getPackageManager(runtime.merged.distro ?? "alpine").label} VM. If a command is not found, install it with \`/fort add <package>\`. Package names are distro-native and may differ from binary names.`;
+  }
   function isLastHintActive(ctx) {
     const entries = ctx.sessionManager.getEntries();
     for (let i = entries.length - 1; i >= 0; i--) {
@@ -1141,7 +1368,7 @@ Allow this request?`
     return false;
   }
   function sendFortHint() {
-    pi.sendMessage({ customType: "fort:info", content: FORT_HINT, display: true }, { deliverAs: "nextTurn" });
+    pi.sendMessage({ customType: "fort:info", content: fortHint(), display: true }, { deliverAs: "nextTurn" });
   }
   function sendFortOff() {
     pi.sendMessage(
@@ -1149,10 +1376,32 @@ Allow this request?`
       { deliverAs: "nextTurn" }
     );
   }
+  async function afterPersistentConfigChange(ctx) {
+    reloadRuntimeConfig();
+    if (fortVm?.isRunning || vmStarting) {
+      await shutdownVm();
+      ctx.ui.notify("\u{1F9CA} Config updated. VM will restart on next tool use.");
+    }
+  }
+  function ensureInitializedForCommand(ctx) {
+    try {
+      requireProjectConfig(localCwd);
+      return true;
+    } catch (err) {
+      ctx.ui.notify(err.message, "warning");
+      return false;
+    }
+  }
   pi.registerCommand("fort", {
-    description: "Manage fort: /fort [status|init|on|off|restart|add <pkg>]",
+    description: "Manage fort: /fort [status|init|on|off|restart|add <pkg>|network allow|deny|container <path>|default|mount <host> [guest]|mount-writable <host> [guest]|list-mounts|unmount <guest>]",
     handler: async (args, ctx) => {
-      const parts = args.trim().split(/\s+/);
+      let parts;
+      try {
+        parts = parseFortArgs(args);
+      } catch (err) {
+        ctx.ui.notify(`pi-fort: ${err.message}`, "warning");
+        return;
+      }
       const subcommand = parts[0] || "status";
       switch (subcommand) {
         case "status": {
@@ -1166,8 +1415,8 @@ Allow this request?`
           }
           lines.push("");
           const configLines = [];
-          if (hasProjectConfig) configLines.push(`  ${tildify(projectConfigPath(localCwd))}`);
-          if (dropIns.length) configLines.push(`  ${tildify(projectDropInDir(localCwd))}/*`);
+          if (runtime.hasProjectConfig) configLines.push(`  ${tildify(projectConfigPath(localCwd))}`);
+          if (runtime.dropIns.length) configLines.push(`  ${tildify(projectDropInDir(localCwd))}/*`);
           if (configLines.length) {
             lines.push("Config:");
             lines.push(...configLines);
@@ -1175,14 +1424,14 @@ Allow this request?`
             lines.push("Config: none");
           }
           lines.push("");
-          lines.push(`Distro:    ${distro}`);
-          lines.push(`Packages:  ${packages.join(", ")}`);
-          const secretNames = secrets.map((s) => s.name).join(", ");
+          lines.push(`Distro:    ${runtime.merged.distro ?? "alpine"}`);
+          lines.push(`Packages:  ${(runtime.merged.packages ?? []).join(", ")}`);
+          const secretNames = runtime.secrets.map((s) => s.name).join(", ");
           if (secretNames) lines.push(`Secrets:   ${secretNames}`);
-          const envNames = Object.keys(extraEnv).join(", ");
+          const envNames = Object.keys(runtime.extraEnv).join(", ");
           if (envNames) lines.push(`Env:       ${envNames}`);
-          lines.push(`Egress:    ${allowEgress ? "allow all HTTP hosts" : "configured hosts only"}`);
-          const hostNames = [...policies.keys()].join(", ");
+          lines.push(`Egress:    ${runtime.merged.allow_egress ? "allow all HTTP hosts" : "configured hosts only"}`);
+          const hostNames = [...runtime.policies.keys()].join(", ");
           if (hostNames) lines.push(`Policies:  ${hostNames}`);
           ctx.ui.notify(lines.join("\n"));
           break;
@@ -1201,7 +1450,8 @@ Allow this request?`
           }
           ctx.ui.notify(`\u{1F9CA} ${messages.join("\n")}`);
           if (created.length > 0) {
-            ctx.ui.notify("Reload with /reload to apply the new config.", "info");
+            reloadRuntimeConfig();
+            ctx.ui.notify("pi-fort initialized. VM will start on next tool use.", "info");
           }
           break;
         }
@@ -1224,6 +1474,95 @@ Allow this request?`
           ctx.ui.notify("\u{1F9CA} pi-fort: VM will restart on next tool use.");
           break;
         }
+        case "network": {
+          if (!ensureInitializedForCommand(ctx)) return;
+          const mode = parts[1];
+          if (mode !== "allow" && mode !== "deny") {
+            ctx.ui.notify("Usage: /fort network allow|deny", "warning");
+            return;
+          }
+          setNetworkConfig(localCwd, mode === "allow");
+          await afterPersistentConfigChange(ctx);
+          ctx.ui.notify(`\u{1F9CA} Network egress ${mode === "allow" ? "allowed" : "restricted to configured hosts"}.`);
+          break;
+        }
+        case "container": {
+          if (!ensureInitializedForCommand(ctx)) return;
+          const imagePath = parts[1];
+          if (!imagePath || parts.length > 2) {
+            ctx.ui.notify("Usage: /fort container <container-path>|default", "warning");
+            return;
+          }
+          if (imagePath === "default") {
+            resetContainerConfig(localCwd);
+            await afterPersistentConfigChange(ctx);
+            ctx.ui.notify("\u{1F9CA} Container reset to default Alpine image.");
+          } else {
+            setContainerConfig(localCwd, imagePath);
+            await afterPersistentConfigChange(ctx);
+            ctx.ui.notify(`\u{1F9CA} Container set to Debian image ${storedPathForCommandInput(localCwd, imagePath)}.`);
+          }
+          break;
+        }
+        case "mount":
+        case "mount-writable": {
+          if (!ensureInitializedForCommand(ctx)) return;
+          const hostPath = parts[1];
+          const guestPath = parts[2];
+          if (!hostPath || parts.length > 3) {
+            ctx.ui.notify(`Usage: /fort ${subcommand} <host-path> [<vm-path>]`, "warning");
+            return;
+          }
+          if (guestPath && !guestPath.startsWith("/")) {
+            ctx.ui.notify(`VM path must be absolute. Usage: /fort ${subcommand} <host-path> [<vm-path>]`, "warning");
+            return;
+          }
+          setMountConfig(localCwd, hostPath, guestPath, subcommand === "mount");
+          await afterPersistentConfigChange(ctx);
+          const effectiveHostPath = effectiveHostPathForCommandInput(localCwd, hostPath);
+          const effectiveGuestPath = guestPath ?? effectiveHostPath;
+          const warning = existsSync3(effectiveHostPath) ? "" : "\nWarning: host path does not currently exist, so it will be skipped until created.";
+          ctx.ui.notify(
+            `\u{1F9CA} Added ${subcommand === "mount" ? "read-only" : "read-write"} mount ${effectiveGuestPath} \u2190 ${effectiveHostPath}.${warning}`
+          );
+          break;
+        }
+        case "list-mounts": {
+          const lines = ["VM mounts:"];
+          for (const mount of effectiveMounts(localCwd)) {
+            const mode = mount.readonly ? "read-only" : "read-write";
+            const source = mount.builtIn ? "built-in" : tildify(mount.source);
+            const missing = mount.exists ? "" : "  missing/skipped";
+            const fixed = mount.builtIn ? "  not unmountable" : "";
+            lines.push(`  ${mount.target} \u2190 ${mount.path}  ${mode}  ${source}${fixed}${missing}`);
+          }
+          ctx.ui.notify(lines.join("\n"));
+          break;
+        }
+        case "unmount": {
+          if (!ensureInitializedForCommand(ctx)) return;
+          const guestPath = parts[1];
+          if (!guestPath || parts.length > 2) {
+            ctx.ui.notify("Usage: /fort unmount <guest-path>", "warning");
+            return;
+          }
+          if (!guestPath.startsWith("/")) {
+            ctx.ui.notify("Guest path must be absolute. Usage: /fort unmount <guest-path>", "warning");
+            return;
+          }
+          if (guestPath === localCwd) {
+            ctx.ui.notify("Cannot unmount the default workspace mount.", "warning");
+            return;
+          }
+          const removed = removeMountConfig(localCwd, guestPath);
+          if (!removed) {
+            ctx.ui.notify(`No .pi/fort.toml mount found for guest path ${guestPath}.`, "warning");
+            return;
+          }
+          await afterPersistentConfigChange(ctx);
+          ctx.ui.notify(`\u{1F9CA} Unmounted ${guestPath}.`);
+          break;
+        }
         case "add": {
           const query = parts.slice(1).join(" ");
           if (!query) {
@@ -1240,10 +1579,14 @@ Allow this request?`
             return;
           }
           await handleAddPackage(query, vmForAdd, localCwd, ctx);
+          reloadRuntimeConfig();
           break;
         }
         default:
-          ctx.ui.notify("Usage: /fort [status|init|on|off|restart|add <pkg>]", "warning");
+          ctx.ui.notify(
+            "Usage: /fort [status|init|on|off|restart|add <pkg>|network allow|deny|container <path>|default|mount <host> [guest]|mount-writable <host> [guest]|list-mounts|unmount <guest>]",
+            "warning"
+          );
       }
     }
   });
@@ -1254,5 +1597,6 @@ Allow this request?`
   });
 }
 export {
-  index_default as default
+  index_default as default,
+  parseFortArgs
 };
