@@ -8,15 +8,25 @@
  * See README.md for architecture and configuration details.
  */
 
+import { existsSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createBashTool, createEditTool, createReadTool, createWriteTool } from "@earendil-works/pi-coding-agent";
-import type { ResolvedSecret } from "./config.js";
+import type { FortFileConfig, ResolvedHostPolicy, ResolvedSecret } from "./config.js";
 import {
 	addPackageToConfig,
+	effectiveHostPathForCommandInput,
+	effectiveMounts,
 	initProjectConfig,
 	loadConfig,
 	projectConfigPath,
 	projectDropInDir,
+	removeMountConfig,
+	requireProjectConfig,
+	resetContainerConfig,
+	setContainerConfig,
+	setMountConfig,
+	setNetworkConfig,
+	storedPathForCommandInput,
 	tildify,
 } from "./config.js";
 import { getPackageManager } from "./package-manager.js";
@@ -93,6 +103,57 @@ async function handleAddPackage(
 }
 
 // ---------------------------------------------------------------------------
+// Command parsing
+// ---------------------------------------------------------------------------
+
+export function parseFortArgs(args: string): string[] {
+	const result: string[] = [];
+	let current = "";
+	let quote: '"' | "'" | undefined;
+	let escaped = false;
+	let inToken = false;
+
+	for (const ch of args.trim()) {
+		if (escaped) {
+			current += ch;
+			escaped = false;
+			inToken = true;
+			continue;
+		}
+		if (ch === "\\") {
+			escaped = true;
+			inToken = true;
+			continue;
+		}
+		if (quote) {
+			if (ch === quote) quote = undefined;
+			else current += ch;
+			inToken = true;
+			continue;
+		}
+		if (ch === '"' || ch === "'") {
+			quote = ch;
+			inToken = true;
+			continue;
+		}
+		if (/\s/.test(ch)) {
+			if (inToken) {
+				result.push(current);
+				current = "";
+				inToken = false;
+			}
+			continue;
+		}
+		current += ch;
+		inToken = true;
+	}
+	if (escaped) current += "\\";
+	if (quote) throw new Error("Unterminated quote");
+	if (inToken) result.push(current);
+	return result;
+}
+
+// ---------------------------------------------------------------------------
 // Extension entry point
 // ---------------------------------------------------------------------------
 
@@ -115,43 +176,54 @@ export default function (pi: ExtensionAPI) {
 	// Load config and secrets
 	// -----------------------------------------------------------------------
 	const localCwd = process.cwd();
-	const { merged, policies, hasProjectConfig, dropIns } = loadConfig(localCwd);
-	const image = merged.image;
-	const distro = merged.distro ?? "alpine";
-	const packages = merged.packages ?? [];
-	const extraMounts = merged.mounts ?? [];
-	const gitCredentials = merged["git-credentials"] ?? [];
-	const allowEgress = merged.allow_egress ?? false;
+	type RuntimeConfig = {
+		merged: FortFileConfig;
+		policies: Map<string, ResolvedHostPolicy>;
+		hasProjectConfig: boolean;
+		dropIns: string[];
+		secrets: ResolvedSecret[];
+		extraEnv: Record<string, string>;
+		allowedHosts: string[] | undefined;
+	};
 
-	// Resolve env vars from config (non-secret, injected as real VM env vars)
-	const extraEnv = resolveEnv(merged.env);
-	const setupScript = merged.setup;
+	function buildRuntimeConfig(): RuntimeConfig {
+		const loaded = loadConfig(localCwd);
+		const secrets = resolveSecrets(loaded.merged.secrets);
+		const policyHosts = [...loaded.policies.keys()];
+		const secretHosts = secrets.flatMap((s) => s.hosts);
+		const allowEgress = loaded.merged.allow_egress ?? false;
+		return {
+			...loaded,
+			secrets,
+			extraEnv: resolveEnv(loaded.merged.env),
+			allowedHosts: allowEgress ? undefined : [...new Set([...secretHosts, ...policyHosts])],
+		};
+	}
 
-	let secrets: ResolvedSecret[];
+	let runtime: RuntimeConfig;
 	try {
-		secrets = resolveSecrets(merged.secrets);
+		runtime = buildRuntimeConfig();
 	} catch (err) {
 		pi.on("session_start", (_event, ctx) => {
-			ctx.ui.notify(`pi-fort: failed to resolve secrets: ${(err as Error).message}`, "error");
+			ctx.ui.notify(`pi-fort: failed to load config: ${(err as Error).message}`, "error");
 		});
 		return;
 	}
 
-	const policyHosts = [...policies.keys()];
-	const secretHosts = secrets.flatMap((s) => s.hosts);
-	const allowedHosts = allowEgress ? undefined : [...new Set([...secretHosts, ...policyHosts])];
+	function reloadRuntimeConfig(): void {
+		runtime = buildRuntimeConfig();
+	}
 
 	// -----------------------------------------------------------------------
 	// Activation state
 	// -----------------------------------------------------------------------
 	// enabled from config (undefined = not configured)
-	const configEnabled = merged.enabled;
 	// session override (set by /fort on|off, or from session log on resume)
 	let sessionOverride: boolean | undefined;
 
 	function isActive(): boolean {
 		if (sessionOverride !== undefined) return sessionOverride;
-		return configEnabled === true;
+		return runtime.merged.enabled === true;
 	}
 
 	function getSessionActivation(ctx: ExtensionContext): boolean | undefined {
@@ -190,16 +262,16 @@ export default function (pi: ExtensionAPI) {
 
 			const instance = new FortVM({
 				workspaceDir: localCwd,
-				image,
-				distro,
-				packages,
-				extraMounts,
-				secrets,
-				gitCredentials,
-				extraEnv,
-				setupScript,
-				allowedHosts,
-				policies,
+				image: runtime.merged.image,
+				distro: runtime.merged.distro ?? "alpine",
+				packages: runtime.merged.packages ?? [],
+				extraMounts: runtime.merged.mounts ?? [],
+				secrets: runtime.secrets,
+				gitCredentials: runtime.merged["git-credentials"] ?? [],
+				extraEnv: runtime.extraEnv,
+				setupScript: runtime.merged.setup,
+				allowedHosts: runtime.allowedHosts,
+				policies: runtime.policies,
 				onPolicyPrompt: async (method, url, hostname) => {
 					if (!ctx.hasUI) return false;
 					return ctx.ui.confirm(
@@ -240,7 +312,7 @@ export default function (pi: ExtensionAPI) {
 			if (!isLastHintActive(ctx)) {
 				sendFortHint();
 			}
-		} else if (configEnabled === undefined && sessionOverride === undefined) {
+		} else if (runtime.merged.enabled === undefined && sessionOverride === undefined) {
 			ctx.ui.notify("🧊 pi-fort is installed but not enabled. Run /fort init to set up.");
 		}
 	});
@@ -307,7 +379,9 @@ export default function (pi: ExtensionAPI) {
 	// -----------------------------------------------------------------------
 	// Fort context messages (added to conversation, not system prompt)
 	// -----------------------------------------------------------------------
-	const FORT_HINT = `🧊 Fort active. All tools are running inside an isolated ${getPackageManager(distro).label} VM. If a command is not found, install it with \`/fort add <package>\`. Package names are distro-native and may differ from binary names.`;
+	function fortHint(): string {
+		return `🧊 Fort active. All tools are running inside an isolated ${getPackageManager(runtime.merged.distro ?? "alpine").label} VM. If a command is not found, install it with \`/fort add <package>\`. Package names are distro-native and may differ from binary names.`;
+	}
 
 	/** Check if the most recent fort message is an "on" hint (not an "off"). */
 	function isLastHintActive(ctx: ExtensionContext): boolean {
@@ -321,7 +395,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function sendFortHint() {
-		pi.sendMessage({ customType: "fort:info", content: FORT_HINT, display: true }, { deliverAs: "nextTurn" });
+		pi.sendMessage({ customType: "fort:info", content: fortHint(), display: true }, { deliverAs: "nextTurn" });
 	}
 
 	function sendFortOff() {
@@ -331,13 +405,38 @@ export default function (pi: ExtensionAPI) {
 		);
 	}
 
+	async function afterPersistentConfigChange(ctx: ExtensionContext): Promise<void> {
+		reloadRuntimeConfig();
+		if (fortVm?.isRunning || vmStarting) {
+			await shutdownVm();
+			ctx.ui.notify("🧊 Config updated. VM will restart on next tool use.");
+		}
+	}
+
+	function ensureInitializedForCommand(ctx: ExtensionContext): boolean {
+		try {
+			requireProjectConfig(localCwd);
+			return true;
+		} catch (err) {
+			ctx.ui.notify((err as Error).message, "warning");
+			return false;
+		}
+	}
+
 	// -----------------------------------------------------------------------
 	// Commands
 	// -----------------------------------------------------------------------
 	pi.registerCommand("fort", {
-		description: "Manage fort: /fort [status|init|on|off|restart|add <pkg>]",
+		description:
+			"Manage fort: /fort [status|init|on|off|restart|add <pkg>|network allow|deny|container <path>|default|mount <host> [guest]|mount-writable <host> [guest]|list-mounts|unmount <guest>]",
 		handler: async (args, ctx) => {
-			const parts = args.trim().split(/\s+/);
+			let parts: string[];
+			try {
+				parts = parseFortArgs(args);
+			} catch (err) {
+				ctx.ui.notify(`pi-fort: ${(err as Error).message}`, "warning");
+				return;
+			}
 			const subcommand = parts[0] || "status";
 
 			switch (subcommand) {
@@ -356,8 +455,8 @@ export default function (pi: ExtensionAPI) {
 
 					// Config sources
 					const configLines: string[] = [];
-					if (hasProjectConfig) configLines.push(`  ${tildify(projectConfigPath(localCwd))}`);
-					if (dropIns.length) configLines.push(`  ${tildify(projectDropInDir(localCwd))}/*`);
+					if (runtime.hasProjectConfig) configLines.push(`  ${tildify(projectConfigPath(localCwd))}`);
+					if (runtime.dropIns.length) configLines.push(`  ${tildify(projectDropInDir(localCwd))}/*`);
 					if (configLines.length) {
 						lines.push("Config:");
 						lines.push(...configLines);
@@ -367,18 +466,18 @@ export default function (pi: ExtensionAPI) {
 					lines.push("");
 
 					// What's inside
-					lines.push(`Distro:    ${distro}`);
-					lines.push(`Packages:  ${packages.join(", ")}`);
+					lines.push(`Distro:    ${runtime.merged.distro ?? "alpine"}`);
+					lines.push(`Packages:  ${(runtime.merged.packages ?? []).join(", ")}`);
 
-					const secretNames = secrets.map((s) => s.name).join(", ");
+					const secretNames = runtime.secrets.map((s) => s.name).join(", ");
 					if (secretNames) lines.push(`Secrets:   ${secretNames}`);
 
-					const envNames = Object.keys(extraEnv).join(", ");
+					const envNames = Object.keys(runtime.extraEnv).join(", ");
 					if (envNames) lines.push(`Env:       ${envNames}`);
 
-					lines.push(`Egress:    ${allowEgress ? "allow all HTTP hosts" : "configured hosts only"}`);
+					lines.push(`Egress:    ${runtime.merged.allow_egress ? "allow all HTTP hosts" : "configured hosts only"}`);
 
-					const hostNames = [...policies.keys()].join(", ");
+					const hostNames = [...runtime.policies.keys()].join(", ");
 					if (hostNames) lines.push(`Policies:  ${hostNames}`);
 
 					ctx.ui.notify(lines.join("\n"));
@@ -403,7 +502,8 @@ export default function (pi: ExtensionAPI) {
 					ctx.ui.notify(`🧊 ${messages.join("\n")}`);
 
 					if (created.length > 0) {
-						ctx.ui.notify("Reload with /reload to apply the new config.", "info");
+						reloadRuntimeConfig();
+						ctx.ui.notify("pi-fort initialized. VM will start on next tool use.", "info");
 					}
 					break;
 				}
@@ -430,6 +530,102 @@ export default function (pi: ExtensionAPI) {
 					break;
 				}
 
+				case "network": {
+					if (!ensureInitializedForCommand(ctx)) return;
+					const mode = parts[1];
+					if (mode !== "allow" && mode !== "deny") {
+						ctx.ui.notify("Usage: /fort network allow|deny", "warning");
+						return;
+					}
+					setNetworkConfig(localCwd, mode === "allow");
+					await afterPersistentConfigChange(ctx);
+					ctx.ui.notify(`🧊 Network egress ${mode === "allow" ? "allowed" : "restricted to configured hosts"}.`);
+					break;
+				}
+
+				case "container": {
+					if (!ensureInitializedForCommand(ctx)) return;
+					const imagePath = parts[1];
+					if (!imagePath || parts.length > 2) {
+						ctx.ui.notify("Usage: /fort container <container-path>|default", "warning");
+						return;
+					}
+					if (imagePath === "default") {
+						resetContainerConfig(localCwd);
+						await afterPersistentConfigChange(ctx);
+						ctx.ui.notify("🧊 Container reset to default Alpine image.");
+					} else {
+						setContainerConfig(localCwd, imagePath);
+						await afterPersistentConfigChange(ctx);
+						ctx.ui.notify(`🧊 Container set to Debian image ${storedPathForCommandInput(localCwd, imagePath)}.`);
+					}
+					break;
+				}
+
+				case "mount":
+				case "mount-writable": {
+					if (!ensureInitializedForCommand(ctx)) return;
+					const hostPath = parts[1];
+					const guestPath = parts[2];
+					if (!hostPath || parts.length > 3) {
+						ctx.ui.notify(`Usage: /fort ${subcommand} <host-path> [<vm-path>]`, "warning");
+						return;
+					}
+					if (guestPath && !guestPath.startsWith("/")) {
+						ctx.ui.notify(`VM path must be absolute. Usage: /fort ${subcommand} <host-path> [<vm-path>]`, "warning");
+						return;
+					}
+					setMountConfig(localCwd, hostPath, guestPath, subcommand === "mount");
+					await afterPersistentConfigChange(ctx);
+					const effectiveHostPath = effectiveHostPathForCommandInput(localCwd, hostPath);
+					const effectiveGuestPath = guestPath ?? effectiveHostPath;
+					const warning = existsSync(effectiveHostPath)
+						? ""
+						: "\nWarning: host path does not currently exist, so it will be skipped until created.";
+					ctx.ui.notify(
+						`🧊 Added ${subcommand === "mount" ? "read-only" : "read-write"} mount ${effectiveGuestPath} ← ${effectiveHostPath}.${warning}`,
+					);
+					break;
+				}
+
+				case "list-mounts": {
+					const lines = ["VM mounts:"];
+					for (const mount of effectiveMounts(localCwd)) {
+						const mode = mount.readonly ? "read-only" : "read-write";
+						const source = mount.builtIn ? "built-in" : tildify(mount.source);
+						const missing = mount.exists ? "" : "  missing/skipped";
+						const fixed = mount.builtIn ? "  not unmountable" : "";
+						lines.push(`  ${mount.target} ← ${mount.path}  ${mode}  ${source}${fixed}${missing}`);
+					}
+					ctx.ui.notify(lines.join("\n"));
+					break;
+				}
+
+				case "unmount": {
+					if (!ensureInitializedForCommand(ctx)) return;
+					const guestPath = parts[1];
+					if (!guestPath || parts.length > 2) {
+						ctx.ui.notify("Usage: /fort unmount <guest-path>", "warning");
+						return;
+					}
+					if (!guestPath.startsWith("/")) {
+						ctx.ui.notify("Guest path must be absolute. Usage: /fort unmount <guest-path>", "warning");
+						return;
+					}
+					if (guestPath === localCwd) {
+						ctx.ui.notify("Cannot unmount the default workspace mount.", "warning");
+						return;
+					}
+					const removed = removeMountConfig(localCwd, guestPath);
+					if (!removed) {
+						ctx.ui.notify(`No .pi/fort.toml mount found for guest path ${guestPath}.`, "warning");
+						return;
+					}
+					await afterPersistentConfigChange(ctx);
+					ctx.ui.notify(`🧊 Unmounted ${guestPath}.`);
+					break;
+				}
+
 				case "add": {
 					const query = parts.slice(1).join(" ");
 					if (!query) {
@@ -449,11 +645,15 @@ export default function (pi: ExtensionAPI) {
 						return;
 					}
 					await handleAddPackage(query, vmForAdd, localCwd, ctx);
+					reloadRuntimeConfig();
 					break;
 				}
 
 				default:
-					ctx.ui.notify("Usage: /fort [status|init|on|off|restart|add <pkg>]", "warning");
+					ctx.ui.notify(
+						"Usage: /fort [status|init|on|off|restart|add <pkg>|network allow|deny|container <path>|default|mount <host> [guest]|mount-writable <host> [guest]|list-mounts|unmount <guest>]",
+						"warning",
+					);
 			}
 		},
 	});
