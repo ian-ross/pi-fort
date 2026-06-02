@@ -6,7 +6,7 @@
  */
 
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseTOML } from "smol-toml";
 import * as v from "valibot";
@@ -185,8 +185,10 @@ function readTomlFile(path: string): FortFileConfig | undefined {
  * Collect config files from the current project only.
  *
  * Merge order:
- * 1. `.pi/fort.toml`
- * 2. `.pi/fort.d/*.toml` in alphabetical order
+ * 1. `.pi/fort.d/*.toml` in alphabetical order
+ * 2. `.pi/fort.toml`
+ *
+ * Drop-ins provide integration defaults; the project config is authoritative.
  */
 export interface ConfigLayer {
 	path: string;
@@ -198,10 +200,6 @@ export function collectConfigFiles(cwd: string): ConfigLayer[] {
 	const projectDir = resolve(cwd);
 
 	const mainPath = projectConfigPath(projectDir);
-	const mainConfig = readTomlFile(mainPath);
-	if (mainConfig) {
-		layers.push({ path: mainPath, config: mainConfig });
-	}
 
 	const dropInDir = projectDropInDir(projectDir);
 	if (existsSync(dropInDir)) {
@@ -217,6 +215,11 @@ export function collectConfigFiles(cwd: string): ConfigLayer[] {
 		}
 	}
 
+	const mainConfig = readTomlFile(mainPath);
+	if (mainConfig) {
+		layers.push({ path: mainPath, config: mainConfig });
+	}
+
 	return layers;
 }
 
@@ -228,6 +231,15 @@ function isPathLikeImage(image: string): boolean {
 		image.startsWith("../") ||
 		image.startsWith("/")
 	);
+}
+
+function resolveConfigPath(path: string, configPath: string | undefined): string {
+	const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
+	if (path === "~") return home;
+	if (path.startsWith("~/")) return join(home, path.slice(2));
+	if (path.startsWith("/")) return path;
+	if (!configPath) return path;
+	return resolve(dirname(configPath), path);
 }
 
 function resolveImagePath(image: string, configPath: string | undefined): string {
@@ -291,7 +303,8 @@ export function mergeConfigs(layers: FortFileConfig[] | ConfigLayer[]): FortFile
 		}
 		if (layer.mounts) {
 			for (const mount of layer.mounts) {
-				mountsByTarget.set(mount.target ?? mount.path, mount);
+				const resolvedMount = { ...mount, path: resolveConfigPath(mount.path, layerPath) };
+				mountsByTarget.set(resolvedMount.target ?? resolvedMount.path, resolvedMount);
 			}
 		}
 		if (layer.env) {
@@ -392,18 +405,6 @@ export function loadConfig(cwd: string): {
 	const dropInPrefix = `${projectDropInDir(projectDir)}/`;
 	const dropIns = layers.filter((l) => l.path.startsWith(dropInPrefix)).map((l) => basename(l.path, ".toml"));
 
-	// Resolve mount paths: expand ~, resolve relative paths against cwd
-	if (merged.mounts) {
-		const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
-		merged.mounts = merged.mounts.map((m) => {
-			let p = m.path;
-			if (p === "~") p = home;
-			else if (p.startsWith("~/")) p = join(home, p.slice(2));
-			else if (!p.startsWith("/")) p = join(projectDir, p);
-			return { ...m, path: p };
-		});
-	}
-
 	return { merged, policies, hasProjectConfig, dropIns };
 }
 
@@ -498,4 +499,214 @@ export function addPackageToConfig(cwd: string, pkg: string): void {
 	} else {
 		writeFileSync(configPath, `${packagesLine}\n`, "utf-8");
 	}
+}
+
+export type WritableMountDef = { path: string; target?: string; readonly: boolean };
+
+export interface EffectiveMount {
+	path: string;
+	target: string;
+	readonly: boolean;
+	source: "built-in" | string;
+	exists: boolean;
+	builtIn: boolean;
+}
+
+export function requireProjectConfig(cwd: string): string {
+	const configPath = projectConfigPath(cwd);
+	if (!existsSync(configPath)) {
+		throw new Error("pi-fort needs to be initialized first. Run /fort init.");
+	}
+	return configPath;
+}
+
+function readProjectConfigForEdit(cwd: string): { configPath: string; raw: string; config: FortFileConfig } {
+	const configPath = requireProjectConfig(cwd);
+	const raw = readFileSync(configPath, "utf-8");
+	const parsed = parseTOML(raw);
+	const config = v.parse(FortFileConfig, parsed);
+	return { configPath, raw, config };
+}
+
+function tomlString(value: string): string {
+	return JSON.stringify(value);
+}
+
+function topLevelScalarLine(key: string, value: string): string {
+	return `${key} = ${value}`;
+}
+
+function upsertTopLevelScalar(raw: string, key: string, value: string): string {
+	const line = topLevelScalarLine(key, value);
+	const re = new RegExp(`^\\s*#?\\s*${key}\\s*=.*$`, "m");
+	if (re.test(raw)) return raw.replace(re, line);
+	return raw.endsWith("\n") ? `${raw}${line}\n` : `${raw}\n${line}\n`;
+}
+
+function removeTopLevelScalar(raw: string, key: string): string {
+	return raw.replace(new RegExp(`^\\s*${key}\\s*=.*(?:\\n|$)`, "m"), "");
+}
+
+function bracketBalance(line: string): number {
+	let balance = 0;
+	let quote: '"' | "'" | undefined;
+	let escaped = false;
+	for (const ch of line) {
+		if (escaped) {
+			escaped = false;
+			continue;
+		}
+		if (quote === '"' && ch === "\\") {
+			escaped = true;
+			continue;
+		}
+		if (quote) {
+			if (ch === quote) quote = undefined;
+			continue;
+		}
+		if (ch === '"' || ch === "'") quote = ch;
+		else if (ch === "[") balance++;
+		else if (ch === "]") balance--;
+	}
+	return balance;
+}
+
+function replaceMountsBlock(raw: string, mounts: WritableMountDef[]): string {
+	let lines = raw.split(/(?<=\n)/);
+	let start = -1;
+	let end = -1;
+	for (let i = 0; i < lines.length; i++) {
+		if (!/^\s*mounts\s*=/.test(lines[i])) continue;
+		start = i;
+		let balance = bracketBalance(lines[i]);
+		end = i;
+		while (balance > 0 && end + 1 < lines.length) {
+			end++;
+			balance += bracketBalance(lines[end]);
+		}
+		break;
+	}
+
+	const block = formatMountsBlock(mounts);
+	if (start >= 0) {
+		lines.splice(start, end - start + 1, block);
+		return lines.join("");
+	}
+
+	// Convert older [[mounts]] array-of-table syntax to the command-managed
+	// inline object array. This avoids writing a duplicate TOML key.
+	lines = lines.filter((line, index) => {
+		if (!/^\s*\[\[mounts\]\]\s*$/.test(line)) return true;
+		let next = index + 1;
+		while (next < lines.length && !/^\s*\[/.test(lines[next])) next++;
+		for (let i = index; i < next; i++) lines[i] = "";
+		return false;
+	});
+	const withoutMountTables = lines.join("");
+	return withoutMountTables.endsWith("\n") ? `${withoutMountTables}${block}` : `${withoutMountTables}\n${block}`;
+}
+
+function formatMountsBlock(mounts: WritableMountDef[]): string {
+	if (mounts.length === 0) return "mounts = []\n";
+	const lines = ["mounts = ["];
+	for (const mount of mounts) {
+		const parts = [`path = ${tomlString(mount.path)}`];
+		if (mount.target) parts.push(`target = ${tomlString(mount.target)}`);
+		parts.push(`readonly = ${mount.readonly ? "true" : "false"}`);
+		lines.push(`\t{ ${parts.join(", ")} },`);
+	}
+	lines.push("]");
+	return `${lines.join("\n")}\n`;
+}
+
+export function storedPathForCommandInput(cwd: string, input: string): string {
+	if (input === "~" || input.startsWith("~/") || isAbsolute(input)) return input;
+	const absolute = resolve(cwd, input);
+	return relative(dirname(projectConfigPath(cwd)), absolute) || ".";
+}
+
+export function effectiveHostPathFromStored(cwd: string, storedPath: string): string {
+	return resolveConfigPath(storedPath, projectConfigPath(cwd));
+}
+
+export function effectiveHostPathForCommandInput(cwd: string, input: string): string {
+	if (input === "~" || input.startsWith("~/")) return resolveConfigPath(input, projectConfigPath(cwd));
+	return isAbsolute(input) ? input : resolve(cwd, input);
+}
+
+export function setNetworkConfig(cwd: string, allow: boolean): void {
+	const { configPath, raw } = readProjectConfigForEdit(cwd);
+	writeFileSync(configPath, upsertTopLevelScalar(raw, "allow_egress", allow ? "true" : "false"), "utf-8");
+}
+
+export function setContainerConfig(cwd: string, imagePath: string): void {
+	const { configPath, raw } = readProjectConfigForEdit(cwd);
+	const stored = storedPathForCommandInput(cwd, imagePath);
+	let next = upsertTopLevelScalar(raw, "distro", tomlString("debian"));
+	next = upsertTopLevelScalar(next, "image", tomlString(stored));
+	writeFileSync(configPath, next, "utf-8");
+}
+
+export function resetContainerConfig(cwd: string): void {
+	const { configPath, raw } = readProjectConfigForEdit(cwd);
+	let next = removeTopLevelScalar(raw, "distro");
+	next = removeTopLevelScalar(next, "image");
+	writeFileSync(configPath, next, "utf-8");
+}
+
+export function setMountConfig(
+	cwd: string,
+	hostPathInput: string,
+	guestPath: string | undefined,
+	readonly: boolean,
+): void {
+	const { configPath, raw, config } = readProjectConfigForEdit(cwd);
+	const storedHostPath = storedPathForCommandInput(cwd, hostPathInput);
+	const target = guestPath ?? effectiveHostPathForCommandInput(cwd, hostPathInput);
+	const currentMounts = (config.mounts ?? []) as WritableMountDef[];
+	const nextMounts = currentMounts.filter((m) => (m.target ?? effectiveHostPathFromStored(cwd, m.path)) !== target);
+	const mount: WritableMountDef = { path: storedHostPath, readonly };
+	if (target !== effectiveHostPathForCommandInput(cwd, hostPathInput)) mount.target = target;
+	nextMounts.push(mount);
+	writeFileSync(configPath, replaceMountsBlock(raw, nextMounts), "utf-8");
+}
+
+export function removeMountConfig(cwd: string, guestPath: string): boolean {
+	const { configPath, raw, config } = readProjectConfigForEdit(cwd);
+	const currentMounts = (config.mounts ?? []) as WritableMountDef[];
+	const nextMounts = currentMounts.filter((m) => (m.target ?? effectiveHostPathFromStored(cwd, m.path)) !== guestPath);
+	if (nextMounts.length === currentMounts.length) return false;
+	writeFileSync(configPath, replaceMountsBlock(raw, nextMounts), "utf-8");
+	return true;
+}
+
+export function effectiveMounts(cwd: string): EffectiveMount[] {
+	const projectDir = resolve(cwd);
+	const mountsByTarget = new Map<string, EffectiveMount>();
+	const layers = collectConfigFiles(projectDir);
+	for (const layer of layers) {
+		for (const mount of layer.config.mounts ?? []) {
+			const path = resolveConfigPath(mount.path, layer.path);
+			const target = mount.target ?? path;
+			mountsByTarget.set(target, {
+				path,
+				target,
+				readonly: mount.readonly,
+				source: layer.path,
+				exists: existsSync(path),
+				builtIn: false,
+			});
+		}
+	}
+	return [
+		{
+			path: projectDir,
+			target: projectDir,
+			readonly: false,
+			source: "built-in",
+			exists: existsSync(projectDir),
+			builtIn: true,
+		},
+		...mountsByTarget.values(),
+	];
 }

@@ -19,10 +19,10 @@ enabled = true
 # Base packages (drop-in files in .pi/fort.d/ add more):
 packages = ["git", "curl", "jq"]
 
-# Mount directories outside the workspace (relative paths ok, supports ~).
-# Missing paths are silently skipped. Bare string mounts appear at the same
-# path inside the VM. Use object form to set readonly or a guest target path.
-# mounts = ["../.git", { path = "~/shared/configs", target = "/mnt/configs", readonly = true }]
+# Mount directories outside the workspace (relative paths are resolved against
+# this config file, supports ~). Missing paths are silently skipped. Mounts
+# appear at the same path inside the VM unless target is set.
+# mounts = [{ path = "../.git", readonly = false }, { path = "~/shared/configs", target = "/mnt/configs", readonly = true }]
 
 # Environment variables available in the VM and setup scripts.
 # Values can be static strings, host commands, or host env vars.

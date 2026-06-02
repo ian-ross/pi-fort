@@ -149,24 +149,26 @@ GraphQL policy parses the request body and checks actual field names (not the sp
 
 ### Mounts
 
-The workspace directory is mounted automatically at the same path inside the VM. Use `mounts` for directories outside it, like a jj/git repo root that is a parent of the workspace. Relative host paths are resolved against the workspace directory. Missing host paths are silently skipped, so optional mounts are safe to declare unconditionally:
+The workspace directory is mounted automatically at the same path inside the VM. Use `mounts` for directories outside it, like a jj/git repo root that is a parent of the workspace. Relative host paths in config files are resolved against the config file that sets them. Missing host paths are silently skipped, so optional mounts are safe to declare unconditionally:
 
 ```toml
 # In .pi/fort.toml (project config)
-mounts = ["../.jj", "../.git"]
+mounts = [
+  { path = "../.jj", readonly = false },
+  { path = "../.git", readonly = false },
+]
 ```
 
 Absolute and `~`-prefixed paths also work:
 
 ```toml
-mounts = ["~/shared/data"]
+mounts = [{ path = "~/shared/data", readonly = true }]
 ```
 
-Bare string mounts appear at the same path inside the VM and are read-write. Use the object form for read-only mounts or to choose a different guest path with `target`:
+Mounts appear at the same absolute path inside the VM unless you choose a different guest path with `target`:
 
 ```toml
 mounts = [
-  "../.jj",
   { path = "~/shared/configs", target = "/mnt/configs", readonly = true },
 ]
 ```
@@ -175,10 +177,10 @@ mounts = [
 
 pi-fort loads configuration from the current project only. Merge order is:
 
-1. `.pi/fort.toml`
-2. `.pi/fort.d/*.toml` in alphabetical order
+1. `.pi/fort.d/*.toml` in alphabetical order
+2. `.pi/fort.toml`
 
-`image` and `allow_egress` use the last configured value. Packages accumulate across all layers; secrets, hosts, and env merge by key (later wins). Old global config files under `~/.pi/agent/extensions/` are ignored.
+Drop-ins provide integration defaults; `.pi/fort.toml` is authoritative. `image`, `distro`, and `allow_egress` use the last configured value. Packages accumulate across all layers; secrets, hosts, mounts, git credentials, and env merge by key/target (later wins). Old global config files under `~/.pi/agent/extensions/` are ignored.
 
 ```toml
 # .pi/fort.toml — allow all GitHub operations in this project
@@ -198,3 +200,10 @@ unmatched = "allow"
 | `/fort off` | Disable VM isolation for this session (shuts down VM) |
 | `/fort restart` | Restart VM on next tool use |
 | `/fort add <package>` | Search for, install, and save a distro-native package to `.pi/fort.toml` |
+| `/fort network allow\|deny` | Persist whether arbitrary public HTTP egress is allowed |
+| `/fort container <container-path>` | Use a Debian Gondolin image; relative paths are interpreted from Pi's startup directory and stored relative to `.pi/fort.toml` |
+| `/fort container default` | Return to the default Alpine image by removing `distro` and `image` from `.pi/fort.toml` |
+| `/fort mount <host-path> [<vm-path>]` | Add/update a read-only mount, keyed by guest path |
+| `/fort mount-writable <host-path> [<vm-path>]` | Add/update a read-write mount, keyed by guest path |
+| `/fort list-mounts` | Show built-in and configured mounts, including missing/skipped paths |
+| `/fort unmount <guest-path>` | Remove a `.pi/fort.toml` mount by guest path; the built-in workspace mount cannot be removed |

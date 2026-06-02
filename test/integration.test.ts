@@ -4,14 +4,22 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	addPackageToConfig,
 	collectConfigFiles,
+	effectiveMounts,
 	initProjectConfig,
 	loadConfig,
+	projectConfigPath,
 	projectDropInDir,
+	removeMountConfig,
+	resetContainerConfig,
+	setContainerConfig,
+	setMountConfig,
+	setNetworkConfig,
+	storedPathForCommandInput,
 } from "../src/config.js";
 
 // Override HOME so we don't touch real config
@@ -69,9 +77,9 @@ describe("collectConfigFiles with drop-ins", () => {
 		const layers = collectConfigFiles(projectDir);
 		const paths = layers.map((l) => l.path);
 		expect(paths).toEqual([
-			join(projectDir, ".pi", "fort.toml"),
 			join(projectDir, ".pi", "fort.d", "git.toml"),
 			join(projectDir, ".pi", "fort.d", "github.toml"),
+			join(projectDir, ".pi", "fort.toml"),
 		]);
 	});
 
@@ -114,14 +122,14 @@ describe("collectConfigFiles with drop-ins", () => {
 		expect(result.dropIns).toEqual(["git", "github"]);
 	});
 
-	it("lets drop-ins override the main project config", () => {
+	it("lets the main project config override drop-ins", () => {
 		const projectDir = join(tmpDir, "project");
 		mkdirSync(join(projectDir, ".pi", "fort.d"), { recursive: true });
 		writeFileSync(join(projectDir, ".pi", "fort.toml"), 'enabled = true\nimage = "main:latest"\n');
 		writeFileSync(join(projectDir, ".pi", "fort.d", "image.toml"), 'image = "dropin:latest"\n');
 
 		const { merged } = loadConfig(projectDir);
-		expect(merged.image).toBe("dropin:latest");
+		expect(merged.image).toBe("main:latest");
 	});
 
 	it("resolves relative image paths against the config file that sets them", () => {
@@ -131,7 +139,7 @@ describe("collectConfigFiles with drop-ins", () => {
 		writeFileSync(join(projectDir, ".pi", "fort.d", "image.toml"), 'image = "../images/dropin"\n');
 
 		const { merged } = loadConfig(projectDir);
-		expect(merged.image).toBe(join(projectDir, ".pi", "images/dropin"));
+		expect(merged.image).toBe(join(projectDir, ".pi", "images/main"));
 	});
 
 	it("leaves image tags unchanged", () => {
@@ -184,6 +192,80 @@ describe("addPackageToConfig", () => {
 	});
 });
 
+describe("persistent config commands", () => {
+	it("stores command-relative paths relative to .pi/fort.toml", () => {
+		const projectDir = join(tmpDir, "project");
+		mkdirSync(join(projectDir, ".pi"), { recursive: true });
+		expect(storedPathForCommandInput(projectDir, "images/debian")).toBe("../images/debian");
+		expect(dirname(projectConfigPath(projectDir))).toBe(join(projectDir, ".pi"));
+	});
+
+	it("sets network egress while preserving comments", () => {
+		const projectDir = join(tmpDir, "project");
+		mkdirSync(join(projectDir, ".pi"), { recursive: true });
+		writeFileSync(join(projectDir, ".pi", "fort.toml"), "# keep me\n# allow_egress = false\n");
+		setNetworkConfig(projectDir, true);
+		const content = readFileSync(join(projectDir, ".pi", "fort.toml"), "utf-8");
+		expect(content).toContain("# keep me");
+		expect(content).toContain("allow_egress = true");
+	});
+
+	it("sets and resets Debian container config", () => {
+		const projectDir = join(tmpDir, "project");
+		mkdirSync(join(projectDir, ".pi"), { recursive: true });
+		writeFileSync(join(projectDir, ".pi", "fort.toml"), "enabled = true\n");
+		setContainerConfig(projectDir, "images/debian");
+		let content = readFileSync(join(projectDir, ".pi", "fort.toml"), "utf-8");
+		expect(content).toContain('distro = "debian"');
+		expect(content).toContain('image = "../images/debian"');
+		resetContainerConfig(projectDir);
+		content = readFileSync(join(projectDir, ".pi", "fort.toml"), "utf-8");
+		expect(content).not.toContain("distro =");
+		expect(content).not.toContain("image =");
+	});
+
+	it("converts array-of-table mounts when updating command-managed mounts", () => {
+		const projectDir = join(tmpDir, "project");
+		mkdirSync(join(projectDir, ".pi"), { recursive: true });
+		writeFileSync(
+			join(projectDir, ".pi", "fort.toml"),
+			'enabled = true\n\n[[mounts]]\npath = "../old"\ntarget = "/mnt/old"\nreadonly = true\n',
+		);
+		setMountConfig(projectDir, "host", "/mnt/host", true);
+		const content = readFileSync(join(projectDir, ".pi", "fort.toml"), "utf-8");
+		expect(content).not.toContain("[[mounts]]");
+		expect(content).toContain('target = "/mnt/old"');
+		expect(content).toContain('target = "/mnt/host"');
+	});
+
+	it("adds, updates, lists, and removes mounts by guest path", () => {
+		const projectDir = join(tmpDir, "project");
+		mkdirSync(join(projectDir, ".pi", "fort.d"), { recursive: true });
+		writeFileSync(join(projectDir, ".pi", "fort.toml"), "enabled = true\n");
+		writeFileSync(
+			join(projectDir, ".pi", "fort.d", "data.toml"),
+			'mounts = [{ path = "../drop", target = "/mnt/data", readonly = true }]\n',
+		);
+
+		setMountConfig(projectDir, "host-a", "/mnt/data", true);
+		setMountConfig(projectDir, "host-b", "/mnt/data", false);
+		let content = readFileSync(join(projectDir, ".pi", "fort.toml"), "utf-8");
+		expect(content).toContain('path = "../host-b"');
+		expect(content).toContain('target = "/mnt/data"');
+		expect(content).toContain("readonly = false");
+		expect(content).not.toContain("host-a");
+
+		let mounts = effectiveMounts(projectDir);
+		expect(mounts.find((m) => m.target === "/mnt/data")?.source).toBe(join(projectDir, ".pi", "fort.toml"));
+
+		expect(removeMountConfig(projectDir, "/mnt/data")).toBe(true);
+		content = readFileSync(join(projectDir, ".pi", "fort.toml"), "utf-8");
+		expect(content).toContain("mounts = []");
+		mounts = effectiveMounts(projectDir);
+		expect(mounts.find((m) => m.target === "/mnt/data")?.source).toBe(join(projectDir, ".pi", "fort.d", "data.toml"));
+	});
+});
+
 describe("mount path resolution", () => {
 	it("expands ~ to HOME in mount paths", () => {
 		const projectDir = join(tmpDir, "project");
@@ -203,14 +285,14 @@ describe("mount path resolution", () => {
 		expect(merged.mounts?.[1]?.path).toBe(join(tmpDir, "dev/.git"));
 	});
 
-	it("resolves relative paths against cwd", () => {
+	it("resolves relative paths against the config file that sets them", () => {
 		const projectDir = join(tmpDir, "project", "sub");
 		mkdirSync(join(projectDir, ".pi"), { recursive: true });
 		writeFileSync(join(projectDir, ".pi", "fort.toml"), 'enabled = true\nmounts = ["../.jj", "../.git"]\n');
 		const { merged } = loadConfig(projectDir);
 		expect(merged.mounts).toHaveLength(2);
-		expect(merged.mounts?.[0]?.path).toBe(join(tmpDir, "project", ".jj"));
-		expect(merged.mounts?.[1]?.path).toBe(join(tmpDir, "project", ".git"));
+		expect(merged.mounts?.[0]?.path).toBe(join(tmpDir, "project", "sub", ".jj"));
+		expect(merged.mounts?.[1]?.path).toBe(join(tmpDir, "project", "sub", ".git"));
 	});
 
 	it("resolves nested relative paths against cwd", () => {
@@ -218,7 +300,7 @@ describe("mount path resolution", () => {
 		mkdirSync(join(projectDir, ".pi"), { recursive: true });
 		writeFileSync(join(projectDir, ".pi", "fort.toml"), 'enabled = true\nmounts = ["../shared/data"]\n');
 		const { merged } = loadConfig(projectDir);
-		expect(merged.mounts?.[0]?.path).toBe(join(tmpDir, "shared/data"));
+		expect(merged.mounts?.[0]?.path).toBe(join(tmpDir, "project", "shared/data"));
 	});
 
 	it("preserves absolute guest target paths", () => {
@@ -230,7 +312,7 @@ describe("mount path resolution", () => {
 		);
 		const { merged } = loadConfig(projectDir);
 		expect(merged.mounts?.[0]).toEqual({
-			path: join(tmpDir, "shared/config"),
+			path: join(tmpDir, "project", "shared/config"),
 			target: "/mnt/config",
 			readonly: true,
 		});
@@ -252,7 +334,7 @@ describe("mount path resolution", () => {
 			'enabled = true\n\n[[mounts]]\npath = "../.jj"\nreadonly = true\n',
 		);
 		const { merged } = loadConfig(projectDir);
-		expect(merged.mounts?.[0]?.path).toBe(join(tmpDir, "project", ".jj"));
+		expect(merged.mounts?.[0]?.path).toBe(join(tmpDir, "project", "sub", ".jj"));
 		expect(merged.mounts?.[0]?.readonly).toBe(true);
 	});
 });
