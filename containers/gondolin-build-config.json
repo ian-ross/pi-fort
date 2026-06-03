@@ -1,0 +1,11 @@
+{
+  "arch": "x86_64",
+  "distro": "alpine",
+  "oci": {
+    "image": "pi-work:local"
+  },
+  "rootfs": {
+    "label": "gondolin-root",
+    "sizeMb": 2048
+  }
+}
