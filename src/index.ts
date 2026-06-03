@@ -8,7 +8,8 @@
  * See README.md for architecture and configuration details.
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
+import { join, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createBashTool, createEditTool, createReadTool, createWriteTool } from "@earendil-works/pi-coding-agent";
 import type { FortFileConfig, ResolvedHostPolicy, ResolvedSecret } from "./config.js";
@@ -29,7 +30,7 @@ import {
 	storedPathForCommandInput,
 	tildify,
 } from "./config.js";
-import { getPackageManager } from "./package-manager.js";
+import { type Distro, getPackageManager } from "./package-manager.js";
 import { resolveEnv, resolveSecrets } from "./secrets.js";
 import { createVmBashOps, createVmEditOps, createVmReadOps, createVmWriteOps } from "./tools.js";
 import { checkQemuAvailable, FortVM } from "./vm.js";
@@ -159,6 +160,61 @@ export function parseFortArgs(args: string): string[] {
 
 /** Session entry type for recording per-session on/off toggle. */
 const SESSION_ENTRY_TYPE = "fort:active";
+const PI_FORT_IMAGE_ENV = "PI_FORT_IMAGE";
+const ALPINE_DEFAULT_IMAGE = "alpine-default";
+
+interface EffectiveImageConfig {
+	image: string | undefined;
+	distro: Distro;
+	source: "config" | "env" | "alpine-default" | "missing";
+	error?: string;
+}
+
+function isPathLikeImage(image: string): boolean {
+	return (
+		image === "~" ||
+		image.startsWith("~/") ||
+		image.startsWith("./") ||
+		image.startsWith("../") ||
+		image.startsWith("/")
+	);
+}
+
+function resolveEnvImagePath(cwd: string, image: string): string {
+	const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
+	if (image === "~") return home;
+	if (image.startsWith("~/")) return join(home, image.slice(2));
+	if (image.startsWith("/")) return image;
+	return resolve(cwd, image);
+}
+
+function validateImageDirectory(image: string, source: string): string | undefined {
+	try {
+		if (!existsSync(image)) return `${source} image path does not exist: ${image}`;
+		if (!statSync(image).isDirectory()) return `${source} image path is not a directory: ${image}`;
+		const hasManifest = existsSync(join(image, "manifest.json"));
+		const hasDefaultAssets =
+			existsSync(join(image, "vmlinuz-virt")) &&
+			existsSync(join(image, "initramfs.cpio.lz4")) &&
+			existsSync(join(image, "rootfs.ext4"));
+		if (!hasManifest && !hasDefaultAssets) {
+			return `${source} image path is not a Gondolin asset directory: ${image}`;
+		}
+	} catch (err) {
+		return `${source} image path cannot be read: ${(err as Error).message}`;
+	}
+	return undefined;
+}
+
+function missingImageInstructions(): string {
+	return [
+		"pi-fort: PI_FORT_IMAGE is required for the default pi-work container.",
+		"Build the image, then set PI_FORT_IMAGE to the built Gondolin asset directory:",
+		"  make -C containers pi-work",
+		"  export PI_FORT_IMAGE=$PWD/containers/pi-work",
+		"Set PI_FORT_IMAGE=alpine-default to explicitly use Gondolin's built-in Alpine image.",
+	].join("\n");
+}
 
 export default function (pi: ExtensionAPI) {
 	// -----------------------------------------------------------------------
@@ -180,20 +236,62 @@ export default function (pi: ExtensionAPI) {
 		merged: FortFileConfig;
 		policies: Map<string, ResolvedHostPolicy>;
 		hasProjectConfig: boolean;
+		hasExplicitDistro: boolean;
 		dropIns: string[];
+		effectiveImage: EffectiveImageConfig;
 		secrets: ResolvedSecret[];
 		extraEnv: Record<string, string>;
 		allowedHosts: string[] | undefined;
 	};
 
+	function resolveEffectiveImage(merged: FortFileConfig, hasExplicitDistro: boolean): EffectiveImageConfig {
+		if (merged.image !== undefined) {
+			const error = isPathLikeImage(merged.image) ? validateImageDirectory(merged.image, "Configured") : undefined;
+			return {
+				image: merged.image,
+				distro: (merged.distro ?? "debian") as Distro,
+				source: "config",
+				error,
+			};
+		}
+
+		const envImage = process.env[PI_FORT_IMAGE_ENV]?.trim();
+		if (!envImage) {
+			return {
+				image: undefined,
+				distro: (merged.distro ?? "debian") as Distro,
+				source: "missing",
+				error: missingImageInstructions(),
+			};
+		}
+
+		if (envImage === ALPINE_DEFAULT_IMAGE) {
+			return {
+				image: undefined,
+				distro: hasExplicitDistro ? ((merged.distro ?? "debian") as Distro) : "alpine",
+				source: "alpine-default",
+			};
+		}
+
+		const image = resolveEnvImagePath(localCwd, envImage);
+		return {
+			image,
+			distro: (merged.distro ?? "debian") as Distro,
+			source: "env",
+			error: validateImageDirectory(image, PI_FORT_IMAGE_ENV),
+		};
+	}
+
 	function buildRuntimeConfig(): RuntimeConfig {
 		const loaded = loadConfig(localCwd);
+		const effectiveImage = resolveEffectiveImage(loaded.merged, loaded.hasExplicitDistro);
 		const secrets = resolveSecrets(loaded.merged.secrets);
 		const policyHosts = [...loaded.policies.keys()];
 		const secretHosts = secrets.flatMap((s) => s.hosts);
 		const allowEgress = loaded.merged.allow_egress ?? false;
 		return {
 			...loaded,
+			effectiveImage,
 			secrets,
 			extraEnv: resolveEnv(loaded.merged.env),
 			allowedHosts: allowEgress ? undefined : [...new Set([...secretHosts, ...policyHosts])],
@@ -258,12 +356,15 @@ export default function (pi: ExtensionAPI) {
 		if (vmStarting) return vmStarting;
 
 		vmStarting = (async () => {
+			if (runtime.effectiveImage.error) {
+				throw new Error(runtime.effectiveImage.error);
+			}
 			ctx.ui.setStatus("fort", "🧊 Starting VM...");
 
 			const instance = new FortVM({
 				workspaceDir: localCwd,
-				image: runtime.merged.image,
-				distro: runtime.merged.distro ?? "alpine",
+				image: runtime.effectiveImage.image,
+				distro: runtime.effectiveImage.distro,
 				packages: runtime.merged.packages ?? [],
 				extraMounts: runtime.merged.mounts ?? [],
 				secrets: runtime.secrets,
@@ -290,7 +391,10 @@ export default function (pi: ExtensionAPI) {
 			setTimeout(() => ctx.ui.setStatus("fort", undefined), 5000);
 
 			return instance;
-		})();
+		})().catch((err) => {
+			vmStarting = undefined;
+			throw err;
+		});
 
 		return vmStarting;
 	}
@@ -306,8 +410,14 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		if (isActive()) {
-			// Start VM eagerly so it's ready when the first tool runs
-			ensureVm(ctx);
+			// Start VM eagerly so it's ready when the first tool runs. If the
+			// default image is not configured, fail closed and leave tools to report
+			// the same error on first use rather than falling back to the host.
+			if (runtime.effectiveImage.error) {
+				ctx.ui.notify(runtime.effectiveImage.error, "error");
+			} else {
+				ensureVm(ctx);
+			}
 			// Send hint if not already in this session's history
 			if (!isLastHintActive(ctx)) {
 				sendFortHint();
@@ -380,7 +490,12 @@ export default function (pi: ExtensionAPI) {
 	// Fort context messages (added to conversation, not system prompt)
 	// -----------------------------------------------------------------------
 	function fortHint(): string {
-		return `🧊 Fort active. All tools are running inside an isolated ${getPackageManager(runtime.merged.distro ?? "alpine").label} VM. If a command is not found, install it with \`/fort add <package>\`. Package names are distro-native and may differ from binary names.`;
+		const packageManager = getPackageManager(runtime.effectiveImage.distro);
+		const distroNote =
+			runtime.effectiveImage.distro === "debian"
+				? "This VM may use Alpine-built Gondolin kernel/initramfs assets with Debian userspace/rootfs. Prefer Debian tools (`apt-get`) and Debian package names; do not infer userspace distro from kernel/initramfs artifacts."
+				: "This VM uses Alpine userspace. Prefer Alpine tools (`apk`) and Alpine package names.";
+		return `🧊 Fort active. All tools are running inside an isolated ${packageManager.label} VM. ${distroNote} If a command is not found, install it with \`/fort add <package>\`.`;
 	}
 
 	/** Check if the most recent fort message is an "on" hint (not an "off"). */
@@ -466,7 +581,15 @@ export default function (pi: ExtensionAPI) {
 					lines.push("");
 
 					// What's inside
-					lines.push(`Distro:    ${runtime.merged.distro ?? "alpine"}`);
+					lines.push(`Distro:    ${runtime.effectiveImage.distro} package-manager/userspace behavior`);
+					if (runtime.effectiveImage.error) {
+						lines.push("Image:     missing/invalid");
+						lines.push(runtime.effectiveImage.error);
+					} else if (runtime.effectiveImage.source === "alpine-default") {
+						lines.push("Image:     Gondolin built-in Alpine default (PI_FORT_IMAGE=alpine-default)");
+					} else {
+						lines.push(`Image:     ${runtime.effectiveImage.image} (${runtime.effectiveImage.source})`);
+					}
 					lines.push(`Packages:  ${(runtime.merged.packages ?? []).join(", ")}`);
 
 					const secretNames = runtime.secrets.map((s) => s.name).join(", ");
@@ -503,7 +626,11 @@ export default function (pi: ExtensionAPI) {
 
 					if (created.length > 0) {
 						reloadRuntimeConfig();
-						ctx.ui.notify("pi-fort initialized. VM will start on next tool use.", "info");
+						if (runtime.effectiveImage.error) {
+							ctx.ui.notify(runtime.effectiveImage.error, "warning");
+						} else {
+							ctx.ui.notify("pi-fort initialized. VM will start on next tool use.", "info");
+						}
 					}
 					break;
 				}
@@ -553,7 +680,7 @@ export default function (pi: ExtensionAPI) {
 					if (imagePath === "default") {
 						resetContainerConfig(localCwd);
 						await afterPersistentConfigChange(ctx);
-						ctx.ui.notify("🧊 Container reset to default Alpine image.");
+						ctx.ui.notify("🧊 Container reset to PI_FORT_IMAGE default.");
 					} else {
 						setContainerConfig(localCwd, imagePath);
 						await afterPersistentConfigChange(ctx);

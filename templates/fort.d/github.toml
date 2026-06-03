@@ -1,9 +1,8 @@
 # GitHub service policy for pi-fort
 # Drop-in file: delete this file to disable GitHub integration.
 
-# Distro-native package name. For Debian images, this may be "gh"
-# if your apt sources provide it.
-packages = ["github-cli"]
+# The default pi-work image includes the GitHub CLI (`gh`).
+# If using a custom image without `gh`, add the distro-native package in fort.toml.
 
 # Secret: how to get the token, where the proxy injects it
 [secrets.GH_TOKEN]

@@ -101,7 +101,7 @@ describe("collectConfigFiles with drop-ins", () => {
 		expect(pkgs).toContain("curl");
 		expect(pkgs).toContain("jq");
 		expect(pkgs).toContain("git");
-		expect(pkgs).toContain("github-cli");
+		expect(pkgs).not.toContain("github-cli");
 		expect(pkgs).not.toContain("jujutsu");
 	});
 

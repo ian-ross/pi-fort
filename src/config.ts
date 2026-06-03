@@ -263,7 +263,7 @@ export function mergeConfigs(layers: FortFileConfig[] | ConfigLayer[]): FortFile
 		enabled: undefined,
 		allow_egress: false,
 		image: undefined,
-		distro: "alpine",
+		distro: "debian",
 		packages: [],
 		mounts: [],
 		env: {},
@@ -391,12 +391,14 @@ export function loadConfig(cwd: string): {
 	merged: FortFileConfig;
 	policies: Map<string, ResolvedHostPolicy>;
 	hasProjectConfig: boolean;
+	hasExplicitDistro: boolean;
 	dropIns: string[];
 } {
 	const projectDir = resolve(cwd);
 	const layers = collectConfigFiles(projectDir);
 	const merged = mergeConfigs(layers);
 	const policies = resolveHostPolicies(merged);
+	const hasExplicitDistro = layers.some((l) => l.config.distro !== undefined);
 
 	const projectPath = projectConfigPath(projectDir);
 	const hasProjectConfig = layers.some((l) => l.path === projectPath);
@@ -405,7 +407,7 @@ export function loadConfig(cwd: string): {
 	const dropInPrefix = `${projectDropInDir(projectDir)}/`;
 	const dropIns = layers.filter((l) => l.path.startsWith(dropInPrefix)).map((l) => basename(l.path, ".toml"));
 
-	return { merged, policies, hasProjectConfig, dropIns };
+	return { merged, policies, hasProjectConfig, hasExplicitDistro, dropIns };
 }
 
 // ---------------------------------------------------------------------------

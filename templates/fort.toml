@@ -10,11 +10,13 @@ enabled = true
 # hosts listed in [hosts].
 # allow_egress = false
 
-# Optional guest distro and custom Gondolin image tag or asset path.
-# Alpine is the default. Use distro = "debian" with a custom Debian image.
+# Optional package-manager distro and custom Gondolin asset directory.
+# By default pi-fort uses PI_FORT_IMAGE, expected to point at a built
+# pi-work Gondolin asset directory. Package-manager behavior defaults to Debian.
+# Set PI_FORT_IMAGE=alpine-default to explicitly use Gondolin's built-in Alpine image.
 # Package names are distro-native; edit drop-ins when switching distros.
-# distro = "alpine"
-# image = "../images/pi-fort-large"
+# distro = "debian"
+# image = "../containers/pi-work"
 
 # Base packages (drop-in files in .pi/fort.d/ add more):
 packages = ["git", "curl", "jq"]

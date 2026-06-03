@@ -12,7 +12,7 @@ Requires QEMU: `brew install qemu` (macOS) or `sudo apt install qemu-system-x86`
 
 ## How it works
 
-pi-fort starts a Linux micro-VM (Alpine by default, Debian with a custom image) using QEMU matching your host architecture, and redirects all tool execution into it. Your workspace is mounted read-write at the same path inside the VM, so tools see identical paths on host and guest. File changes are bidirectional.
+pi-fort starts a Linux micro-VM using QEMU matching your host architecture, and redirects all tool execution into it. By default it expects `PI_FORT_IMAGE` to point at the built `pi-work` Gondolin asset directory. Your workspace is mounted read-write at the same path inside the VM, so tools see identical paths on host and guest. File changes are bidirectional.
 
 The core security property: **secrets never enter the VM**. Secrets configured in your TOML config (like `gh auth token`) are resolved on the host, and their values are replaced with random placeholders inside the VM. Gondolin's HTTP proxy substitutes real values on the wire, only for requests to configured hosts.
 
@@ -53,7 +53,7 @@ Service integrations live in `.pi/fort.d/` as self-contained TOML files. Each ca
 ├── fort.toml               # base config: git, curl, jq, env vars
 └── fort.d/
     ├── git.toml            # git + user identity
-    └── github.toml         # github-cli + secrets + policies
+    └── github.toml         # GitHub secrets + policies
 ```
 
 Example drop-in (`git.toml`):
@@ -79,14 +79,24 @@ USER_EMAIL = { command = "git config --global user.email" }
 
 ### Image and distro
 
-Alpine is the default guest distro. Use a [custom Gondolin image](https://earendil-works.github.io/gondolin/custom-images/) when you need Debian, a different base environment, or a larger root filesystem. Build and tag the image separately, then reference it here:
+By default pi-fort uses the `pi-work` container image built from this package. Build it, then point `PI_FORT_IMAGE` at the resulting Gondolin asset directory:
+
+```bash
+pnpm build:container
+export PI_FORT_IMAGE="$PWD/containers/pi-work"
+# or: make -C containers pi-work
+```
+
+Set `PI_FORT_IMAGE=alpine-default` to explicitly use Gondolin's built-in Alpine image. If `PI_FORT_IMAGE` is unset or points at a missing directory, fort fails closed instead of silently downloading/using Alpine.
+
+You can override the image per project:
 
 ```toml
 distro = "debian"
-image = "../images/pi-fort-debian"
+image = "../containers/pi-work"
 ```
 
-Relative image paths are resolved relative to the config file that sets them; image tags/references like `pi-fort-debian:latest` are left unchanged. Supported distros are `alpine` and `debian`. `packages` are distro-native package names and still accumulate across config layers, so edit/remove Alpine-oriented drop-ins when using Debian images. For example, the GitHub CLI package is `github-cli` on Alpine but often `gh` on Debian if your apt sources provide it. Debian images are expected to provide their own apt source configuration; pi-fort runs `apt-get update` and installs with `--no-install-recommends`.
+Relative image paths are resolved relative to the config file that sets them. `PI_FORT_IMAGE` is path-only, except for the special `alpine-default` value; relative env paths resolve from Pi's startup directory. Supported pi-fort package-manager distros are `alpine` and `debian`. Note that Gondolin's build config may still say `distro = "alpine"` because Gondolin currently builds Alpine kernel/initramfs assets; pi-fort's `distro` controls userspace package-manager behavior inside the rootfs. `packages` are distro-native package names and still accumulate across config layers.
 
 ### Env vars
 
@@ -202,7 +212,7 @@ unmatched = "allow"
 | `/fort add <package>` | Search for, install, and save a distro-native package to `.pi/fort.toml` |
 | `/fort network allow\|deny` | Persist whether arbitrary public HTTP egress is allowed |
 | `/fort container <container-path>` | Use a Debian Gondolin image; relative paths are interpreted from Pi's startup directory and stored relative to `.pi/fort.toml` |
-| `/fort container default` | Return to the default Alpine image by removing `distro` and `image` from `.pi/fort.toml` |
+| `/fort container default` | Return to the `PI_FORT_IMAGE` default by removing `distro` and `image` from `.pi/fort.toml` |
 | `/fort mount <host-path> [<vm-path>]` | Add/update a read-only mount, keyed by guest path |
 | `/fort mount-writable <host-path> [<vm-path>]` | Add/update a read-write mount, keyed by guest path |
 | `/fort list-mounts` | Show built-in and configured mounts, including missing/skipped paths |

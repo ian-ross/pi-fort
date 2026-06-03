@@ -94,7 +94,7 @@ describe("FortFileConfig schema", () => {
 describe("mergeConfigs", () => {
 	it("returns defaults with empty layers", () => {
 		const result = mergeConfigs([]);
-		expect(result.distro).toBe("alpine");
+		expect(result.distro).toBe("debian");
 		expect(result.allow_egress).toBe(false);
 		expect(result.packages).toEqual([]);
 		expect(result.secrets).toEqual({});

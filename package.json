@@ -24,12 +24,14 @@
   "files": [
     "dist",
     "templates",
+    "containers",
     "README.md"
   ],
   "scripts": {
     "build": "tsup",
     "test": "vitest run",
     "test:watch": "vitest",
+    "build:container": "make -C containers pi-work",
     "lint": "biome check .",
     "lint:fix": "biome check --write ."
   },
