@@ -1195,6 +1195,33 @@ function parseFortArgs(args) {
   if (inToken) result.push(current);
   return result;
 }
+var FORT_ARGUMENT_COMPLETIONS = [
+  { value: "status", label: "status", description: "Show VM state, packages, secrets, image, and policy" },
+  { value: "init", label: "init", description: "Create project config files and enable fort" },
+  { value: "on", label: "on", description: "Enable VM isolation for this session" },
+  { value: "off", label: "off", description: "Disable VM isolation for this session" },
+  { value: "restart", label: "restart", description: "Restart the VM on next tool use" },
+  { value: "add ", label: "add <package>", description: "Search, install, and persist a distro-native package" },
+  { value: "network allow", label: "network allow", description: "Allow arbitrary public HTTP egress" },
+  { value: "network deny", label: "network deny", description: "Restrict HTTP egress to configured hosts" },
+  { value: "container ", label: "container <path>", description: "Use a Debian Gondolin asset directory" },
+  { value: "container default", label: "container default", description: "Reset to the PI_FORT_IMAGE default" },
+  { value: "mount ", label: "mount <host-path> [vm-path]", description: "Add/update a read-only mount" },
+  {
+    value: "mount-writable ",
+    label: "mount-writable <host-path> [vm-path]",
+    description: "Add/update a read-write mount"
+  },
+  { value: "list-mounts", label: "list-mounts", description: "Show built-in and configured mounts" },
+  { value: "unmount ", label: "unmount <guest-path>", description: "Remove a configured mount by guest path" }
+];
+function getFortArgumentCompletions(argumentPrefix) {
+  const prefix = argumentPrefix.trimStart();
+  const filtered = FORT_ARGUMENT_COMPLETIONS.filter(
+    (item) => item.value.startsWith(prefix) || item.label.startsWith(prefix)
+  );
+  return filtered.length > 0 ? filtered : null;
+}
 var SESSION_ENTRY_TYPE = "fort:active";
 var PI_FORT_IMAGE_ENV = "PI_FORT_IMAGE";
 var ALPINE_DEFAULT_IMAGE = "alpine-default";
@@ -1479,6 +1506,7 @@ Allow this request?`
   }
   pi.registerCommand("fort", {
     description: "Manage fort: /fort [status|init|on|off|restart|add <pkg>|network allow|deny|container <path>|default|mount <host> [guest]|mount-writable <host> [guest]|list-mounts|unmount <guest>]",
+    getArgumentCompletions: getFortArgumentCompletions,
     handler: async (args, ctx) => {
       let parts;
       try {
