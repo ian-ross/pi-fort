@@ -158,6 +158,24 @@ export interface ResolvedHostPolicy {
 // Config loading
 // ---------------------------------------------------------------------------
 
+function normalizeLegacyMisplacedTopLevel(parsed: unknown): unknown {
+	// Older command writers appended absent top-level settings after [env], which
+	// TOML interprets as env.mounts/env.image/etc. Move those known fort keys back
+	// before schema validation so affected configs remain recoverable.
+	if (!parsed || typeof parsed !== "object") return parsed;
+	const obj = parsed as Record<string, unknown>;
+	const env = obj.env;
+	if (!env || typeof env !== "object" || Array.isArray(env)) return parsed;
+	const envObj = env as Record<string, unknown>;
+	for (const key of ["allow_egress", "image", "distro", "packages", "mounts"] as const) {
+		if (obj[key] === undefined && envObj[key] !== undefined) {
+			obj[key] = envObj[key];
+			delete envObj[key];
+		}
+	}
+	return parsed;
+}
+
 function readTomlFile(path: string): FortFileConfig | undefined {
 	let raw: string;
 	try {
@@ -169,7 +187,7 @@ function readTomlFile(path: string): FortFileConfig | undefined {
 
 	let parsed: unknown;
 	try {
-		parsed = parseTOML(raw);
+		parsed = normalizeLegacyMisplacedTopLevel(parseTOML(raw));
 	} catch (err) {
 		throw new Error(`pi-fort: invalid TOML at ${path}: ${(err as Error).message}`);
 	}
@@ -525,7 +543,7 @@ export function requireProjectConfig(cwd: string): string {
 function readProjectConfigForEdit(cwd: string): { configPath: string; raw: string; config: FortFileConfig } {
 	const configPath = requireProjectConfig(cwd);
 	const raw = readFileSync(configPath, "utf-8");
-	const parsed = parseTOML(raw);
+	const parsed = normalizeLegacyMisplacedTopLevel(parseTOML(raw));
 	const config = v.parse(FortFileConfig, parsed);
 	return { configPath, raw, config };
 }
@@ -538,11 +556,43 @@ function topLevelScalarLine(key: string, value: string): string {
 	return `${key} = ${value}`;
 }
 
+function insertTopLevelBlock(raw: string, block: string): string {
+	const lines = raw.split(/(?<=\n)/);
+	const firstTable = lines.findIndex((line) => /^\s*\[/.test(line));
+	if (firstTable < 0) return raw.endsWith("\n") ? `${raw}${block}` : `${raw}\n${block}`;
+	lines.splice(firstTable, 0, block);
+	return lines.join("");
+}
+
+function removeKeyAssignments(raw: string, key: string): string {
+	const lines = raw.split(/(?<=\n)/);
+	for (let i = 0; i < lines.length; i++) {
+		if (!new RegExp(`^\\s*${key}\\s*=`).test(lines[i])) continue;
+		let end = i;
+		let balance = bracketBalance(lines[i]);
+		while (balance > 0 && end + 1 < lines.length) {
+			end++;
+			balance += bracketBalance(lines[end]);
+		}
+		lines.splice(i, end - i + 1);
+		i--;
+	}
+	return lines.join("");
+}
+
 function upsertTopLevelScalar(raw: string, key: string, value: string): string {
 	const line = topLevelScalarLine(key, value);
-	const re = new RegExp(`^\\s*#?\\s*${key}\\s*=.*$`, "m");
-	if (re.test(raw)) return raw.replace(re, line);
-	return raw.endsWith("\n") ? `${raw}${line}\n` : `${raw}\n${line}\n`;
+	const lines = raw.split(/(?<=\n)/);
+	const firstTable = lines.findIndex((entry) => /^\s*\[/.test(entry));
+	const topLevelEnd = firstTable < 0 ? lines.length : firstTable;
+	const re = new RegExp(`^\\s*#?\\s*${key}\\s*=.*$`);
+	for (let i = 0; i < topLevelEnd; i++) {
+		if (re.test(lines[i])) {
+			lines[i] = `${line}${lines[i].endsWith("\n") ? "\n" : ""}`;
+			return lines.join("");
+		}
+	}
+	return insertTopLevelBlock(removeKeyAssignments(raw, key), `${line}\n`);
 }
 
 function removeTopLevelScalar(raw: string, key: string): string {
@@ -577,12 +627,14 @@ function replaceMountsBlock(raw: string, mounts: WritableMountDef[]): string {
 	let lines = raw.split(/(?<=\n)/);
 	let start = -1;
 	let end = -1;
-	for (let i = 0; i < lines.length; i++) {
+	const firstTable = lines.findIndex((line) => /^\s*\[/.test(line));
+	const topLevelEnd = firstTable < 0 ? lines.length : firstTable;
+	for (let i = 0; i < topLevelEnd; i++) {
 		if (!/^\s*mounts\s*=/.test(lines[i])) continue;
 		start = i;
 		let balance = bracketBalance(lines[i]);
 		end = i;
-		while (balance > 0 && end + 1 < lines.length) {
+		while (balance > 0 && end + 1 < topLevelEnd) {
 			end++;
 			balance += bracketBalance(lines[end]);
 		}
@@ -604,8 +656,8 @@ function replaceMountsBlock(raw: string, mounts: WritableMountDef[]): string {
 		for (let i = index; i < next; i++) lines[i] = "";
 		return false;
 	});
-	const withoutMountTables = lines.join("");
-	return withoutMountTables.endsWith("\n") ? `${withoutMountTables}${block}` : `${withoutMountTables}\n${block}`;
+	const withoutMountTables = removeKeyAssignments(lines.join(""), "mounts");
+	return insertTopLevelBlock(withoutMountTables, block);
 }
 
 function formatMountsBlock(mounts: WritableMountDef[]): string {

@@ -210,6 +210,16 @@ describe("persistent config commands", () => {
 		expect(content).toContain("allow_egress = true");
 	});
 
+	it("adds absent scalar settings before table sections", () => {
+		const projectDir = join(tmpDir, "project");
+		mkdirSync(join(projectDir, ".pi"), { recursive: true });
+		writeFileSync(join(projectDir, ".pi", "fort.toml"), '[env]\nFOO = "bar"\n');
+		setNetworkConfig(projectDir, true);
+		const content = readFileSync(join(projectDir, ".pi", "fort.toml"), "utf-8");
+		expect(content.indexOf("allow_egress = true")).toBeLessThan(content.indexOf("[env]"));
+		expect(loadConfig(projectDir).merged.allow_egress).toBe(true);
+	});
+
 	it("sets and resets Debian container config", () => {
 		const projectDir = join(tmpDir, "project");
 		mkdirSync(join(projectDir, ".pi"), { recursive: true });
@@ -236,6 +246,36 @@ describe("persistent config commands", () => {
 		expect(content).not.toContain("[[mounts]]");
 		expect(content).toContain('target = "/mnt/old"');
 		expect(content).toContain('target = "/mnt/host"');
+	});
+
+	it("adds mounts before table sections so they remain top-level", () => {
+		const projectDir = join(tmpDir, "project");
+		mkdirSync(join(projectDir, ".pi"), { recursive: true });
+		writeFileSync(
+			join(projectDir, ".pi", "fort.toml"),
+			'enabled = true\n\n[env]\nUSER_NAME = { command = "git config user.name" }\n',
+		);
+
+		setMountConfig(projectDir, "/data/concord", undefined, true);
+		const content = readFileSync(join(projectDir, ".pi", "fort.toml"), "utf-8");
+		expect(content.indexOf("mounts = [")).toBeLessThan(content.indexOf("[env]"));
+		expect(loadConfig(projectDir).merged.mounts?.[0]).toEqual({ path: "/data/concord", readonly: true });
+	});
+
+	it("repairs mounts that an older command wrote under env", () => {
+		const projectDir = join(tmpDir, "project");
+		mkdirSync(join(projectDir, ".pi"), { recursive: true });
+		writeFileSync(
+			join(projectDir, ".pi", "fort.toml"),
+			'enabled = true\n\n[env]\nUSER_NAME = { command = "git config user.name" }\nmounts = [\n\t{ path = "/data/concord", readonly = true },\n]\n',
+		);
+
+		expect(loadConfig(projectDir).merged.mounts?.[0]).toEqual({ path: "/data/concord", readonly: true });
+		setMountConfig(projectDir, "/data/concord", undefined, false);
+		const content = readFileSync(join(projectDir, ".pi", "fort.toml"), "utf-8");
+		expect(content.indexOf("mounts = [")).toBeLessThan(content.indexOf("[env]"));
+		expect(content.slice(content.indexOf("[env]")).includes("mounts = [")).toBe(false);
+		expect(loadConfig(projectDir).merged.mounts?.[0]?.readonly).toBe(false);
 	});
 
 	it("adds, updates, lists, and removes mounts by guest path", () => {

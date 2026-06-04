@@ -170,6 +170,20 @@ var FortFileConfig = v.object({
   hosts: v.optional(v.record(v.string(), HostDef), {}),
   setup: v.optional(v.string())
 });
+function normalizeLegacyMisplacedTopLevel(parsed) {
+  if (!parsed || typeof parsed !== "object") return parsed;
+  const obj = parsed;
+  const env = obj.env;
+  if (!env || typeof env !== "object" || Array.isArray(env)) return parsed;
+  const envObj = env;
+  for (const key of ["allow_egress", "image", "distro", "packages", "mounts"]) {
+    if (obj[key] === void 0 && envObj[key] !== void 0) {
+      obj[key] = envObj[key];
+      delete envObj[key];
+    }
+  }
+  return parsed;
+}
 function readTomlFile(path2) {
   let raw;
   try {
@@ -180,7 +194,7 @@ function readTomlFile(path2) {
   }
   let parsed;
   try {
-    parsed = parseTOML(raw);
+    parsed = normalizeLegacyMisplacedTopLevel(parseTOML(raw));
   } catch (err) {
     throw new Error(`pi-fort: invalid TOML at ${path2}: ${err.message}`);
   }
@@ -421,7 +435,7 @@ function requireProjectConfig(cwd) {
 function readProjectConfigForEdit(cwd) {
   const configPath = requireProjectConfig(cwd);
   const raw = readFileSync(configPath, "utf-8");
-  const parsed = parseTOML(raw);
+  const parsed = normalizeLegacyMisplacedTopLevel(parseTOML(raw));
   const config = v.parse(FortFileConfig, parsed);
   return { configPath, raw, config };
 }
@@ -431,14 +445,43 @@ function tomlString(value) {
 function topLevelScalarLine(key, value) {
   return `${key} = ${value}`;
 }
+function insertTopLevelBlock(raw, block) {
+  const lines = raw.split(/(?<=\n)/);
+  const firstTable = lines.findIndex((line) => /^\s*\[/.test(line));
+  if (firstTable < 0) return raw.endsWith("\n") ? `${raw}${block}` : `${raw}
+${block}`;
+  lines.splice(firstTable, 0, block);
+  return lines.join("");
+}
+function removeKeyAssignments(raw, key) {
+  const lines = raw.split(/(?<=\n)/);
+  for (let i = 0; i < lines.length; i++) {
+    if (!new RegExp(`^\\s*${key}\\s*=`).test(lines[i])) continue;
+    let end = i;
+    let balance = bracketBalance(lines[i]);
+    while (balance > 0 && end + 1 < lines.length) {
+      end++;
+      balance += bracketBalance(lines[end]);
+    }
+    lines.splice(i, end - i + 1);
+    i--;
+  }
+  return lines.join("");
+}
 function upsertTopLevelScalar(raw, key, value) {
   const line = topLevelScalarLine(key, value);
-  const re = new RegExp(`^\\s*#?\\s*${key}\\s*=.*$`, "m");
-  if (re.test(raw)) return raw.replace(re, line);
-  return raw.endsWith("\n") ? `${raw}${line}
-` : `${raw}
-${line}
-`;
+  const lines = raw.split(/(?<=\n)/);
+  const firstTable = lines.findIndex((entry) => /^\s*\[/.test(entry));
+  const topLevelEnd = firstTable < 0 ? lines.length : firstTable;
+  const re = new RegExp(`^\\s*#?\\s*${key}\\s*=.*$`);
+  for (let i = 0; i < topLevelEnd; i++) {
+    if (re.test(lines[i])) {
+      lines[i] = `${line}${lines[i].endsWith("\n") ? "\n" : ""}`;
+      return lines.join("");
+    }
+  }
+  return insertTopLevelBlock(removeKeyAssignments(raw, key), `${line}
+`);
 }
 function removeTopLevelScalar(raw, key) {
   return raw.replace(new RegExp(`^\\s*${key}\\s*=.*(?:\\n|$)`, "m"), "");
@@ -470,12 +513,14 @@ function replaceMountsBlock(raw, mounts) {
   let lines = raw.split(/(?<=\n)/);
   let start = -1;
   let end = -1;
-  for (let i = 0; i < lines.length; i++) {
+  const firstTable = lines.findIndex((line) => /^\s*\[/.test(line));
+  const topLevelEnd = firstTable < 0 ? lines.length : firstTable;
+  for (let i = 0; i < topLevelEnd; i++) {
     if (!/^\s*mounts\s*=/.test(lines[i])) continue;
     start = i;
     let balance = bracketBalance(lines[i]);
     end = i;
-    while (balance > 0 && end + 1 < lines.length) {
+    while (balance > 0 && end + 1 < topLevelEnd) {
       end++;
       balance += bracketBalance(lines[end]);
     }
@@ -493,9 +538,8 @@ function replaceMountsBlock(raw, mounts) {
     for (let i = index; i < next; i++) lines[i] = "";
     return false;
   });
-  const withoutMountTables = lines.join("");
-  return withoutMountTables.endsWith("\n") ? `${withoutMountTables}${block}` : `${withoutMountTables}
-${block}`;
+  const withoutMountTables = removeKeyAssignments(lines.join(""), "mounts");
+  return insertTopLevelBlock(withoutMountTables, block);
 }
 function formatMountsBlock(mounts) {
   if (mounts.length === 0) return "mounts = []\n";
