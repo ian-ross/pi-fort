@@ -10,7 +10,7 @@ RUN apt-get update \
         bash ca-certificates curl git jq ripgrep gh \
     && rm -rf /var/lib/apt/lists/*
 
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR="/usr/local/bin" sh
 
 WORKDIR /workspace
 CMD ["bash"]
